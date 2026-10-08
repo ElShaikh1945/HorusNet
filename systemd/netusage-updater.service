@@ -1,0 +1,6 @@
+[Unit]
+Description=Update netusage traffic statistics
+
+[Service]
+Type=oneshot
+ExecStart=/home/yuki/.local/bin/netusage --update

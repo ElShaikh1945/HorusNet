@@ -1,0 +1,14 @@
+{
+  "language": "en",
+  "theme": "cyan",
+  "desktop_notifications": true,
+  "quota": {
+    "enabled": true,
+    "total_limit_gb": 30.0,
+    "cycle_start_day": 16,
+    "daily_limit_gb": 0.0,
+    "daily_warn_percent": 80,
+    "warn_threshold_percent": 80,
+    "crit_threshold_percent": 95
+  }
+}

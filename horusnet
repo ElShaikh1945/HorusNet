@@ -1,0 +1,2996 @@
+#!/usr/bin/env python3
+"""
+HorusNet / NetUsage - A decoupled, professional network traffic monitor and logger.
+Features separated JSON branding, customizable themes, interactive arrow/number TUI,
+data quota management & desktop notifications, hourly visual bar charts,
+deep per-application network inspection & sockets drilldown,
+and clean ASCII/Unicode design.
+"""
+
+import os
+import sys
+import time
+import json
+import csv
+import re
+import argparse
+import sqlite3
+import subprocess
+import termios
+import tty
+import select
+import calendar
+from datetime import datetime, date, timedelta
+
+VERSION = "2.1.0"
+DATA_DIR = os.path.expanduser("~/.local/share/netusage")
+DB_PATH = os.path.join(DATA_DIR, "netusage.db")
+BRANDING_PATH = os.path.join(DATA_DIR, "branding.json")
+THEMES_PATH = os.path.join(DATA_DIR, "themes.json")
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+LOCALES_DIR = os.path.join(DATA_DIR, "locales")
+VNSTAT_DB = "/var/lib/vnstat/vnstat.db"
+
+# Base ANSI Controls
+CLR_RESET = "\033[0m"
+CLR_BOLD = "\033[1m"
+CLR_DIM = "\033[2m"
+CLR_RED = "\033[31m"
+CLR_GREEN = "\033[32m"
+CLR_YELLOW = "\033[33m"
+CLR_CYAN = "\033[36m"
+CLR_REVERSE = "\033[7m"
+CLR_CLEAR_SCREEN = "\033[2J\033[H"
+CLR_HOME = "\033[H"
+CLR_CLEAR_LINE = "\033[K"
+CURSOR_HIDE = "\033[?25l"
+CURSOR_SHOW = "\033[?25h"
+
+# Port to Service dictionary
+PORT_SERVICES = {
+    80: "HTTP",
+    443: "HTTPS",
+    53: "DNS",
+    22: "SSH",
+    21: "FTP",
+    25: "SMTP",
+    587: "SMTP-Sub",
+    993: "IMAPS",
+    123: "NTP",
+    3306: "MySQL",
+    5432: "PostgreSQL",
+    8080: "HTTP-Alt",
+    8443: "HTTPS-Alt",
+    27017: "MongoDB",
+    6379: "Redis",
+    5000: "Flask/Dev",
+    3000: "Node/React",
+    5173: "Vite"
+}
+
+# Available Themes (Built-in Fallbacks)
+DEFAULT_THEMES = {
+    "gold": {
+        "id": "gold",
+        "name_ar": "عين حورس الذهبية (Horus Gold)",
+        "name_en": "Horus Gold",
+        "primary": "\033[33m",       # Amber / Gold
+        "secondary": "\033[93m",     # Bright Gold
+        "accent": "\033[32m",        # Green
+        "highlight": "\033[97m",     # Crisp White
+        "dim": "\033[2m",
+        "border": "\033[33m"
+    },
+    "cyan": {
+        "id": "cyan",
+        "name_ar": "النيون السماوي (Cyan Neon - الافتراضي)",
+        "name_en": "Cyan Neon (Default)",
+        "primary": "\033[36m",       # Cyan
+        "secondary": "\033[34m",     # Blue
+        "accent": "\033[32m",        # Green
+        "highlight": "\033[33m",     # Yellow
+        "dim": "\033[2m",
+        "border": "\033[36m"
+    },
+    "emerald": {
+        "id": "emerald",
+        "name_ar": "الزمردي (Emerald / Matrix)",
+        "name_en": "Emerald / Matrix",
+        "primary": "\033[32m",       # Green
+        "secondary": "\033[92m",     # Bright Green
+        "accent": "\033[36m",        # Cyan
+        "highlight": "\033[97m",     # White
+        "dim": "\033[2m",
+        "border": "\033[32m"
+    },
+    "synthwave": {
+        "id": "synthwave",
+        "name_ar": "السايبربانك (Synthwave / Magenta)",
+        "name_en": "Synthwave / Magenta",
+        "primary": "\033[35m",       # Magenta
+        "secondary": "\033[36m",     # Cyan
+        "accent": "\033[95m",        # Bright Magenta
+        "highlight": "\033[33m",     # Yellow
+        "dim": "\033[2m",
+        "border": "\033[35m"
+    },
+    "monochrome": {
+        "id": "monochrome",
+        "name_ar": "أحادي اللون الكلاسيكي (Monochrome)",
+        "name_en": "Classic Monochrome",
+        "primary": "\033[97m",       # Bright White
+        "secondary": "\033[37m",     # White
+        "accent": "\033[1m",         # Bold
+        "highlight": "\033[7m",      # Invert
+        "dim": "\033[2m",
+        "border": "\033[37m"
+    }
+}
+
+def load_themes():
+    if os.path.exists(THEMES_PATH):
+        try:
+            with open(THEMES_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data:
+                    return data
+        except Exception:
+            pass
+    save_themes(DEFAULT_THEMES)
+    return DEFAULT_THEMES
+
+def save_themes(themes):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(THEMES_PATH, "w", encoding="utf-8") as f:
+            json.dump(themes, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+DEFAULT_SETTINGS = {
+    "language": "en",
+    "theme": "cyan",
+    "desktop_notifications": True,
+    "quota": {
+        "enabled": True,
+        "total_limit_gb": 30.0,
+        "cycle_start_day": 16,
+        "daily_limit_gb": 0.0,
+        "daily_warn_percent": 80,
+        "warn_threshold_percent": 80,
+        "crit_threshold_percent": 95
+    }
+}
+
+def load_settings():
+    if os.path.exists(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    res = dict(DEFAULT_SETTINGS)
+                    res.update(data)
+                    if "quota" in data and isinstance(data["quota"], dict):
+                        res["quota"] = {**DEFAULT_SETTINGS["quota"], **data["quota"]}
+                    return res
+        except Exception:
+            pass
+    save_settings(DEFAULT_SETTINGS)
+    return DEFAULT_SETTINGS
+
+def save_settings(settings):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+DEFAULT_BRANDING = {
+    "name": "HorusNet",
+    "version": "1.0.0",
+    "tagline_ar": "نظام مراقبة وتحليل شبكة الإنترنت",
+    "tagline_en": "Network Traffic Monitor & Analyzer",
+    "show_logo": True,
+    "ascii_logo": [
+        r" _   _                         _   _      _   ",
+        r"| | | | ___  _ __ _   _ ___   | \ | | ___| |_ ",
+        r"| |_| |/ _ \| '__| | | / __|  |  \| |/ _ \ __|",
+        r"|  _  | (_) | |  | |_| \__ \  | |\  |  __/ |_ ",
+        r"|_| |_|\___/|_|   \__,_|___/  |_| \_|\___|\__|"
+    ]
+}
+
+def load_branding():
+    if os.path.exists(BRANDING_PATH):
+        try:
+            with open(BRANDING_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {**DEFAULT_BRANDING, **data}
+        except Exception:
+            pass
+    return DEFAULT_BRANDING
+
+def save_branding(branding):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(BRANDING_PATH, "w", encoding="utf-8") as f:
+            json.dump(branding, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+# Localization dictionary defaults
+DEFAULT_STRINGS = {
+    "ar": {
+        "nav_hint": "الأسهم ↑ / ↓ للتنقل و Enter للاختيار | أو اضغط رقم العنصر مباشرة (Esc للرجوع):",
+        "menu_summary": "موجز الاستهلاك العام",
+        "menu_daily": "سجل الاستهلاك اليومي",
+        "menu_monthly": "سجل الاستهلاك الشهري",
+        "menu_hourly": "الرسم البياني لساعات اليوم",
+        "menu_apps": "التطبيقات النشطة والاتصالات",
+        "menu_interfaces": "تفاصيل كروت الشبكة والـ IP",
+        "menu_live": "مراقبة السرعة اللحظية المباشرة",
+        "menu_export": "تصدير التقارير (CSV / JSON / HTML)",
+        "menu_settings": "الإعدادات والتخصيص",
+        "menu_exit": "خروج",
+        "export_title": "تصدير تقارير الاستهلاك",
+        "export_csv_btn": "تصدير إلى جدول CSV (Excel)",
+        "export_json_btn": "تصدير إلى ملف JSON برمجياً",
+        "export_html_btn": "تصدير تقرير ويب HTML (نمط داكن تفاعلي)",
+        "export_success": "تم تصدير التقرير بنجاح إلى:",
+        "export_path_prompt": "أدخل مسار الحفظ (أو اضغط Enter للمسار الافتراضي):",
+        "period": "الفترة",
+        "download": "▼ تنزيل (DN)",
+        "upload": "▲ رفع (UP)",
+        "total": "● الإجمالي (TOT)",
+        "today": "اليوم",
+        "yesterday": "أمس",
+        "this_month": "هذا الشهر",
+        "session": "الجلسة الحالية (Boot)",
+        "interfaces_title": "كروت الشبكة المتصلة حالياً:",
+        "press_enter_back": "اضغط Enter أو Esc للعودة... (أو q للخروج)",
+        "goodbye": "تم إنهاء البرنامج بنجاح. مع السلامة!",
+        "settings_title": "لوحة الإعدادات والتخصيص",
+        "setting_language": "لغة الواجهة (Language)",
+        "setting_theme": "سمة الألوان (Color Theme)",
+        "setting_quota": "إعدادات باقة الإنترنت (Data Quota)",
+        "setting_logo": "شعار الآسكي (ASCII Logo)",
+        "setting_back": "العودة للقائمة الرئيسية",
+        "enabled": "مفعل",
+        "disabled": "معطل",
+        "quota_title": "إعدادات باقة الإنترنت والتنبيهات",
+        "quota_status": "حالة متابعة الباقة",
+        "quota_limit": "سعة الباقة الإجمالية",
+        "quota_cycle_day": "يوم تجديد الباقة شهرياً",
+        "quota_warn": "نسبة التنبيه الأول",
+        "quota_crit": "نسبة التنبيه الحرج",
+        "quota_test_notif": "اختبار إشعار سطح المكتب الآن",
+        "quota_gauge_title": "باقة الإنترنت الشهرية",
+        "quota_remaining": "المتبقي",
+        "quota_days_left": "يوم متبقي على التجديد",
+        "quota_exceeded": "نفدت الباقة! الزيادة الحالية:",
+        "daily_limit_title": "الحد اليومي المقترح للاستهلاك",
+        "daily_remaining": "المتبقي لليوم",
+        "daily_exceeded": "تجاوز الحد اليومي بمقدار:",
+        "daily_limit_setting": "حد الاستهلاك اليومي (Daily Limit)",
+        "daily_warn_setting": "نسبة تنبيه الحد اليومي",
+        "daily_auto_label": "تلقائي (سعة الباقة ÷ أيام الشهر)",
+        "daily_custom_label": "مخصص",
+        "app_history_title": "سجل استهلاك هذا التطبيق على مدار الأيام (Daily Usage History)",
+        "app_duration_today": "مدة الاستخدام والنشاط اليومي",
+        "notif_sent": "تم إرسال إشعار تجريبي إلى سطح المكتب بنجاح!",
+        "apps_title": "التطبيقات الأكثر استخداماً للشبكة",
+        "apps_nav_hint": "الأسهم ↑ / ↓ و Enter لفحص سجل التطبيق ومدة استخدامه | Esc للعودة",
+        "app_detail_title": "سجل وإحصائيات التطبيق",
+        "app_refresh_hint": "اضغط r لتحديث البيانات لحظياً | Esc للعودة لقائمة التطبيقات",
+        "live_title": "مراقبة السرعة اللحظية المباشرة",
+        "live_hint": "اضغط Esc أو q للإيقاف والعودة.",
+        "target": "الهدف",
+        "all_ifaces": "كافة الكروت المدمجة",
+        "iface_prefix": "كارت الشبكة:",
+        "daily_title": "سجل الاستهلاك اليومي",
+        "monthly_title": "سجل الاستهلاك الشهري",
+        "hourly_title": "سجل الاستهلاك بالساعات والرسم البياني",
+        "hour": "الساعة",
+        "chart": "الرسم البياني",
+        "peak_hour": "ساعة الذروة",
+        "hourly_nav_hint": "الأسهم ◄ / ► أو (p / n) للتنقل بين الأيام | Esc للعودة للقائمة",
+        "status": "الحالة",
+        "date": "التاريخ",
+        "month": "الشهر",
+        "card": "الكارت",
+        "ip_addr": "عنوان الـ IP",
+        "history_rx": "▼ إجمالي التحميل",
+        "history_tx": "▲ إجمالي الرفع",
+        "history_tot": "● الإجمالي",
+        "sum": "المجموع",
+        "no_data": "لا توجد بيانات مسجلة حتى الآن.",
+        "first_run_title": "الإعداد الأولي",
+        "first_run_prompt": "اختر لغة الواجهة (اضغط 1 أو 2 أو اختر بالسهم و Enter):",
+        "lang_name_ar": "العربية",
+        "lang_name_en": "English",
+        "app_col_hash": "#",
+        "app_col_name": "التطبيق",
+        "app_col_down": "▼ تنزيل",
+        "app_col_up": "▲ رفع",
+        "app_col_total": "● الإجمالي",
+        "app_col_runtime": "مدة النشاط اليومي",
+        "app_col_status": "الحالة",
+        "app_status_active": "نشط",
+        "app_status_inactive": "متوقف",
+        "app_empty_msg": "لم يتم رصد أي استهلاك للشبكة من التطبيقات حتى الآن.",
+        "app_footer_hint": "اضغط Enter على التطبيق لفحص سجله التاريخي | اضغط رقم التطبيق مباشرة | Esc للرجوع",
+        "prompt_current_val": "القيمة الحالية: {current_val} | اضغط Enter لتأكيد القيمة",
+        "prompt_enter_new": "❯ أدخل القيمة الجديدة: ",
+        "quota_cycle_day_fmt": "يوم {day}",
+        "quota_prompt_limit": "تحديد حجم الباقة بالجيجابايت (GiB)",
+        "quota_prompt_day": "تحديد يوم بداية دورة الباقة شهرياً (1 - 31)",
+        "quota_prompt_daily_limit": "تحديد الحد اليومي بالجيجابايت (اكتب 0 للحساب التلقائي: الباقة ÷ أيام الشهر)",
+        "quota_prompt_daily_warn": "تحديد نسبة التنبيه للحد اليومي (مثلاً 80)",
+        "quota_prompt_warn": "تحديد نسبة التحذير الأول (مثلاً 80)",
+        "quota_prompt_crit": "تحديد نسبة التحذير الحرج (مثلاً 95)",
+        "quota_test_notif_title": "HorusNet - فحص التنبيهات",
+        "quota_test_notif_msg": "هذا إشعار تجريبي لاختبار عمل تنبيهات سطح المكتب لـ HorusNet بنجاح!",
+        "theme_nav_hint": "↑ / ↓ للتنقل | Enter للاختيار | أو اضغط رقم السمة مباشرة:",
+        "theme_preview_label": "معاينة: ▼ تنزيل (DN)  ▲ رفع (UP)  ● الإجمالي (TOT)",
+        "exe_path_label": "مسار الملف التنفيذي:",
+        "app_status_label": "حالة التطبيق:",
+        "active_runtime_label": "مدة النشاط اليومي:",
+        "usage_today_label": "استهلاك الإنترنت اليوم:",
+        "share_today_label": "نسبة الاستهلاك من الجهاز اليوم:",
+        "cum_traffic_label": "إجمالي الاستهلاك التراكمي للتطبيق (كافة الأيام):",
+        "col_date": "التاريخ",
+        "col_down": "▼ التحميل",
+        "col_up": "▲ الرفع",
+        "col_tot": "● الإجمالي",
+        "col_runtime": "مدة النشاط",
+        "col_share": "النسبة %",
+        "export_unsupported": "صيغة التصدير غير مدعومة: '{fmt}'. الصيغ المدعومة هي: csv, json, html",
+        "export_success_cli": "تم تصدير التقرير ({fmt}) بنجاح إلى: {path}",
+        "app_not_found_cli": "لم يتم العثور على التطبيق '{app}' في سجلات الاستهلاك أو العمليات النشطة."
+    },
+    "en": {
+        "nav_hint": "Arrows ↑ / ↓ to navigate & Enter to select | Or press number directly (Esc to back):",
+        "menu_summary": "Overview & Summary",
+        "menu_daily": "Daily History",
+        "menu_monthly": "Monthly History",
+        "menu_hourly": "Hourly Traffic & Charts",
+        "menu_apps": "Active Apps & Sockets",
+        "menu_interfaces": "Network Interfaces & IP",
+        "menu_live": "Live Speed Meter",
+        "menu_export": "Export Reports (CSV / JSON / HTML)",
+        "menu_settings": "Settings & Themes",
+        "menu_exit": "Exit",
+        "export_title": "Export Traffic Reports",
+        "export_csv_btn": "Export to CSV Spreadsheet (Excel)",
+        "export_json_btn": "Export to JSON API Data",
+        "export_html_btn": "Export to Standalone HTML Dashboard (Dark Mode)",
+        "export_success": "Report exported successfully to:",
+        "export_path_prompt": "Enter save path (or press Enter for default):",
+        "period": "Period",
+        "download": "▼ Download (DN)",
+        "upload": "▲ Upload (UP)",
+        "total": "● Total (TOT)",
+        "today": "Today",
+        "yesterday": "Yesterday",
+        "this_month": "This Month",
+        "session": "Current Session (Boot)",
+        "interfaces_title": "Currently Connected Interfaces:",
+        "press_enter_back": "Press Enter or Esc to return... (or q to exit)",
+        "goodbye": "Exited successfully. Goodbye!",
+        "settings_title": "Settings & Customization",
+        "setting_language": "Interface Language",
+        "setting_theme": "Color Theme",
+        "setting_quota": "Data Quota & Alerts",
+        "setting_logo": "ASCII Banner Logo",
+        "setting_back": "Back to Main Menu",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "quota_title": "Data Quota & Alert Settings",
+        "quota_status": "Quota Tracking",
+        "quota_limit": "Total Data Limit",
+        "quota_cycle_day": "Monthly Renewal Day",
+        "quota_warn": "First Warning Threshold",
+        "quota_crit": "Critical Warning Threshold",
+        "quota_test_notif": "Test Desktop Notification Now",
+        "quota_gauge_title": "Monthly Data Quota",
+        "quota_remaining": "Remaining",
+        "quota_days_left": "days until renewal",
+        "quota_exceeded": "Quota exceeded by:",
+        "daily_limit_title": "Daily Consumption Limit",
+        "daily_remaining": "Daily Remaining",
+        "daily_exceeded": "Daily limit exceeded by:",
+        "daily_limit_setting": "Daily Consumption Limit",
+        "daily_warn_setting": "Daily Warning Threshold",
+        "daily_auto_label": "Auto (Quota ÷ Days in month)",
+        "daily_custom_label": "Custom",
+        "app_history_title": "Daily Usage History for this Application",
+        "app_duration_today": "Active Runtime Today",
+        "notif_sent": "Test desktop notification sent successfully!",
+        "apps_title": "Active Network Applications",
+        "apps_nav_hint": "Arrows ↑ / ↓ and Enter to inspect app history & active duration | Esc to return",
+        "app_detail_title": "Application Usage History & Metrics",
+        "app_refresh_hint": "Press r to refresh live stats | Esc to return to apps list",
+        "live_title": "Live Speed Monitor",
+        "live_hint": "Press Esc or q to stop and return.",
+        "target": "Target",
+        "all_ifaces": "All Interfaces",
+        "iface_prefix": "Interface:",
+        "daily_title": "Daily Traffic History",
+        "monthly_title": "Monthly Traffic History",
+        "hourly_title": "Hourly Traffic Breakdown & Chart",
+        "hour": "Hour",
+        "chart": "Chart",
+        "peak_hour": "Peak Hour",
+        "hourly_nav_hint": "Arrows ◄ / ► or (p / n) to navigate days | Esc to return to menu",
+        "status": "Status",
+        "date": "Date",
+        "month": "Month",
+        "card": "Interface",
+        "ip_addr": "IP Address",
+        "history_rx": "▼ Total Down",
+        "history_tx": "▲ Total Up",
+        "history_tot": "● Total",
+        "sum": "Total",
+        "no_data": "No recorded data yet.",
+        "first_run_title": "Initial Setup",
+        "first_run_prompt": "Select Interface Language (Press 1 or 2, or use arrows & Enter):",
+        "lang_name_ar": "العربية (Arabic)",
+        "lang_name_en": "English",
+        "app_col_hash": "#",
+        "app_col_name": "Application",
+        "app_col_down": "▼ Download",
+        "app_col_up": "▲ Upload",
+        "app_col_total": "● Total",
+        "app_col_runtime": "Active Runtime",
+        "app_col_status": "Status",
+        "app_status_active": "Active",
+        "app_status_inactive": "Inactive",
+        "app_empty_msg": "No network applications with recorded traffic found.",
+        "app_footer_hint": "Press Enter on app to inspect history | Press number directly | Esc to return",
+        "prompt_current_val": "Current value: {current_val} | Press Enter to confirm",
+        "prompt_enter_new": "❯ Enter new value: ",
+        "quota_cycle_day_fmt": "Day {day}",
+        "quota_prompt_limit": "Set total quota limit in GiB",
+        "quota_prompt_day": "Set monthly cycle start day (1 - 31)",
+        "quota_prompt_daily_limit": "Set daily limit in GiB (enter 0 for Auto: Quota ÷ Days)",
+        "quota_prompt_daily_warn": "Set daily warning threshold percent (e.g. 80)",
+        "quota_prompt_warn": "Set monthly first warning threshold percent (e.g. 80)",
+        "quota_prompt_crit": "Set monthly critical warning threshold percent (e.g. 95)",
+        "quota_test_notif_title": "HorusNet - Quota Notification Test",
+        "quota_test_notif_msg": "This is a test notification confirming desktop alerts are working properly!",
+        "theme_nav_hint": "Arrows ↑ / ↓ to navigate | Enter to select | Or press number directly:",
+        "theme_preview_label": "Preview: ▼ Download (DN)  ▲ Upload (UP)  ● Total (TOT)",
+        "exe_path_label": "Executable Path:",
+        "app_status_label": "Application Status:",
+        "active_runtime_label": "Active Runtime Today:",
+        "usage_today_label": "Internet Usage Today:",
+        "share_today_label": "Share of Device Today:",
+        "cum_traffic_label": "Cumulative App Traffic (All Recorded Days):",
+        "col_date": "Date",
+        "col_down": "▼ Download",
+        "col_up": "▲ Upload",
+        "col_tot": "● Total",
+        "col_runtime": "Runtime",
+        "col_share": "Share %",
+        "export_unsupported": "Unsupported export format: '{fmt}'. Supported formats are: csv, json, html",
+        "export_success_cli": "Report ({fmt}) exported successfully to: {path}",
+        "app_not_found_cli": "Application '{app}' not found in active processes or traffic history."
+    }
+}
+
+def load_locales():
+    os.makedirs(LOCALES_DIR, exist_ok=True)
+    en_file = os.path.join(LOCALES_DIR, "en.json")
+    ar_file = os.path.join(LOCALES_DIR, "ar.json")
+
+    if not os.path.exists(en_file):
+        try:
+            with open(en_file, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_STRINGS.get("en", {}), f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+    if not os.path.exists(ar_file):
+        try:
+            with open(ar_file, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_STRINGS.get("ar", {}), f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    loaded = {k: dict(v) for k, v in DEFAULT_STRINGS.items()}
+    try:
+        for fname in os.listdir(LOCALES_DIR):
+            if fname.endswith(".json"):
+                lang_code = fname[:-5]
+                filepath = os.path.join(LOCALES_DIR, fname)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                        if isinstance(d, dict):
+                            if lang_code not in loaded:
+                                loaded[lang_code] = {}
+                            loaded[lang_code].update(d)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return loaded
+
+THEMES = load_themes()
+STRINGS = load_locales()
+
+def format_bytes(b):
+    if b < 1024:
+        return f"{b} B"
+    elif b < 1024 * 1024:
+        return f"{b / 1024:.2f} KiB"
+    elif b < 1024 * 1024 * 1024:
+        return f"{b / (1024 * 1024):.2f} MiB"
+    elif b < 1024 * 1024 * 1024 * 1024:
+        return f"{b / (1024 * 1024 * 1024):.2f} GiB"
+    else:
+        return f"{b / (1024 * 1024 * 1024 * 1024):.2f} TiB"
+
+def format_rate(bps):
+    bits = bps * 8
+    if bits < 1000:
+        return f"{bits:.0f} bit/s"
+    elif bits < 1000 * 1000:
+        return f"{bits / 1000:.1f} kbit/s"
+    elif bits < 1000 * 1000 * 1000:
+        return f"{bits / (1000 * 1000):.2f} Mbit/s"
+    else:
+        return f"{bits / (1000 * 1000 * 1000):.2f} Gbit/s"
+
+def format_duration(seconds, lang="en"):
+    if seconds < 60:
+        return f"{seconds}s" if lang == "en" else f"{seconds} ثانية"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m" if lang == "en" else f"{minutes} دقيقة"
+    hours = minutes // 60
+    rem = minutes % 60
+    if rem == 0:
+        return f"{hours}h" if lang == "en" else f"{hours} ساعة"
+    return f"{hours}h {rem}m" if lang == "en" else f"{hours} س {rem} د"
+
+def get_pid_runtime(pid):
+    try:
+        with open(f"/proc/{pid}/stat", "r") as f:
+            content = f.read()
+            after_comm = content[content.rfind(')') + 2:]
+            fields = after_comm.split()
+            starttime_ticks = int(fields[19])
+        clk_tck = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+        starttime_sec = starttime_ticks / clk_tck
+        with open('/proc/uptime', 'r') as f:
+            uptime = float(f.read().split()[0])
+        return max(0, int(uptime - starttime_sec))
+    except Exception:
+        return 0
+
+def get_boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id", "r") as f:
+            return f.read().strip()
+    except Exception:
+        return "unknown"
+
+def read_proc_net_dev():
+    interfaces = {}
+    try:
+        with open("/proc/net/dev", "r") as f:
+            lines = f.readlines()
+        for line in lines[2:]:
+            parts = line.strip().split(":")
+            if len(parts) == 2:
+                iface = parts[0].strip()
+                if iface == "lo":
+                    continue
+                fields = parts[1].split()
+                rx = int(fields[0])
+                tx = int(fields[8])
+                interfaces[iface] = {"rx": rx, "tx": tx}
+    except Exception:
+        pass
+    return interfaces
+
+def get_interfaces_info():
+    info = {}
+    try:
+        res = subprocess.run(["ip", "-brief", "address"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        for line in res.stdout.strip().split("\n"):
+            parts = line.split()
+            if len(parts) >= 2:
+                iface = parts[0]
+                status = parts[1]
+                ips = parts[2:] if len(parts) > 2 else []
+                ipv4 = [ip for ip in ips if "." in ip]
+                info[iface] = {
+                    "status": status,
+                    "ip": ipv4[0] if ipv4 else (ips[0] if ips else "none")
+                }
+    except Exception:
+        pass
+    return info
+
+def get_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            date TEXT,
+            interface TEXT,
+            rx INTEGER DEFAULT 0,
+            tx INTEGER DEFAULT 0,
+            PRIMARY KEY (date, interface)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS hourly_stats (
+            date TEXT,
+            hour INTEGER,
+            interface TEXT,
+            rx INTEGER DEFAULT 0,
+            tx INTEGER DEFAULT 0,
+            PRIMARY KEY (date, hour, interface)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS state (
+            interface TEXT PRIMARY KEY,
+            boot_id TEXT,
+            last_rx INTEGER,
+            last_tx INTEGER,
+            updated_at REAL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            val TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS quota_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER DEFAULT 0,
+            period_type TEXT DEFAULT 'monthly',
+            cycle_start_day INTEGER DEFAULT 1,
+            total_limit_bytes INTEGER DEFAULT 150323855360,
+            warn_threshold_percent INTEGER DEFAULT 80,
+            crit_threshold_percent INTEGER DEFAULT 95,
+            last_warned_level INTEGER DEFAULT 0,
+            last_warned_cycle TEXT DEFAULT '',
+            daily_limit_bytes INTEGER DEFAULT 0,
+            daily_warn_percent INTEGER DEFAULT 80,
+            last_warned_daily_date TEXT DEFAULT '',
+            last_warned_daily_level INTEGER DEFAULT 0
+        )
+    """)
+    # Ensure quota_config has daily columns if table was created previously
+    c.execute("PRAGMA table_info(quota_config)")
+    quota_cols = [col[1] for col in c.fetchall()]
+    if "daily_limit_bytes" not in quota_cols:
+        c.execute("ALTER TABLE quota_config ADD COLUMN daily_limit_bytes INTEGER DEFAULT 0")
+    if "daily_warn_percent" not in quota_cols:
+        c.execute("ALTER TABLE quota_config ADD COLUMN daily_warn_percent INTEGER DEFAULT 80")
+    if "last_warned_daily_date" not in quota_cols:
+        c.execute("ALTER TABLE quota_config ADD COLUMN last_warned_daily_date TEXT DEFAULT ''")
+    if "last_warned_daily_level" not in quota_cols:
+        c.execute("ALTER TABLE quota_config ADD COLUMN last_warned_daily_level INTEGER DEFAULT 0")
+
+    c.execute("""
+        INSERT OR IGNORE INTO quota_config (id, enabled, period_type, cycle_start_day, total_limit_bytes, warn_threshold_percent, crit_threshold_percent, last_warned_level, last_warned_cycle, daily_limit_bytes, daily_warn_percent, last_warned_daily_date, last_warned_daily_level)
+        VALUES (1, 0, 'monthly', 1, 150323855360, 80, 95, 0, '', 0, 80, '', 0)
+    """)
+
+    # App daily historical usage and state tables
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS app_daily_stats (
+            date TEXT,
+            app_name TEXT,
+            rx INTEGER DEFAULT 0,
+            tx INTEGER DEFAULT 0,
+            active_seconds INTEGER DEFAULT 0,
+            last_seen REAL,
+            PRIMARY KEY (date, app_name)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS app_state (
+            app_name TEXT PRIMARY KEY,
+            last_rx INTEGER DEFAULT 0,
+            last_tx INTEGER DEFAULT 0,
+            last_seen REAL
+        )
+    """)
+    conn.commit()
+
+    # Synchronize settings.json into SQLite if settings.json exists
+    try:
+        s = load_settings()
+        if "theme" in s:
+            c.execute("INSERT OR REPLACE INTO config (key, val) VALUES ('theme', ?)", (s["theme"],))
+        if "language" in s:
+            c.execute("INSERT OR REPLACE INTO config (key, val) VALUES ('language', ?)", (s["language"],))
+        q = s.get("quota", {})
+        if q:
+            q_enabled = 1 if q.get("enabled", True) else 0
+            q_limit_b = int(float(q.get("total_limit_gb", 30.0)) * 1024 * 1024 * 1024)
+            q_day = int(q.get("cycle_start_day", 16))
+            q_daily_b = int(float(q.get("daily_limit_gb", 0.0)) * 1024 * 1024 * 1024)
+            q_daily_warn = int(q.get("daily_warn_percent", 80))
+            q_warn = int(q.get("warn_threshold_percent", 80))
+            q_crit = int(q.get("crit_threshold_percent", 95))
+            c.execute("""
+                UPDATE quota_config SET
+                    enabled = ?, total_limit_bytes = ?, cycle_start_day = ?,
+                    warn_threshold_percent = ?, crit_threshold_percent = ?,
+                    daily_limit_bytes = ?, daily_warn_percent = ?
+                WHERE id = 1
+            """, (q_enabled, q_limit_b, q_day, q_warn, q_crit, q_daily_b, q_daily_warn))
+        conn.commit()
+    except Exception:
+        pass
+
+    return conn
+
+def sync_db_to_settings(conn):
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT enabled, total_limit_bytes, cycle_start_day, warn_threshold_percent, crit_threshold_percent,
+                   daily_limit_bytes, daily_warn_percent
+            FROM quota_config WHERE id = 1
+        """)
+        row = c.fetchone()
+        if row:
+            s = load_settings()
+            s["quota"] = {
+                "enabled": bool(row[0]),
+                "total_limit_gb": round(row[1] / (1024**3), 1),
+                "cycle_start_day": row[2],
+                "daily_limit_gb": round(row[5] / (1024**3), 2) if row[5] else 0.0,
+                "daily_warn_percent": row[6],
+                "warn_threshold_percent": row[3],
+                "crit_threshold_percent": row[4]
+            }
+            save_settings(s)
+    except Exception:
+        pass
+
+def get_config_val(conn, key, default=None):
+    c = conn.cursor()
+    c.execute("SELECT val FROM config WHERE key = ?", (key,))
+    row = c.fetchone()
+    return row[0] if row else default
+
+def set_config_val(conn, key, val):
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO config (key, val) VALUES (?, ?)", (key, val))
+    conn.commit()
+    try:
+        s = load_settings()
+        if key in ("theme", "language"):
+            s[key] = val
+            save_settings(s)
+    except Exception:
+        pass
+
+def get_lang(conn=None):
+    s = load_settings()
+    lang = s.get("language")
+    if not lang and conn:
+        lang = get_config_val(conn, "language", "en")
+    return lang or "en"
+
+def t(conn, key):
+    lang = get_lang(conn)
+    locales = load_locales()
+    lang_dict = locales.get(lang, locales.get("en", {}))
+    return lang_dict.get(key, locales.get("en", {}).get(key, key))
+
+def get_theme(conn=None):
+    themes = load_themes()
+    s = load_settings()
+    theme_key = s.get("theme")
+    if not theme_key and conn:
+        theme_key = get_config_val(conn, "theme", "cyan")
+    theme_key = theme_key or "cyan"
+    return themes.get(theme_key, next(iter(themes.values()), DEFAULT_THEMES["gold"]))
+
+# ----------------------------------------------------
+# Data Quota Management & Notification Engine
+# ----------------------------------------------------
+
+def get_quota_status(conn):
+    c = conn.cursor()
+    c.execute("""
+        SELECT enabled, period_type, cycle_start_day, total_limit_bytes,
+               warn_threshold_percent, crit_threshold_percent, last_warned_level, last_warned_cycle,
+               daily_limit_bytes, daily_warn_percent, last_warned_daily_date, last_warned_daily_level
+        FROM quota_config WHERE id = 1
+    """)
+    row = c.fetchone()
+    if not row or not row[0]:
+        return {"enabled": False}
+
+    (enabled, period_type, start_day, limit_bytes, warn_pct, crit_pct,
+     last_warn_lvl, last_warn_cycle, daily_limit_b, daily_warn_pct,
+     last_daily_date, last_daily_lvl) = row
+
+    today_dt = datetime.now()
+
+    if period_type == "daily":
+        cycle_start_str = today_dt.strftime("%Y-%m-%d")
+        next_cycle_dt = today_dt + timedelta(days=1)
+        cycle_start_dt = today_dt.date()
+        days_left = 1
+        days_in_cycle = 1
+    else:
+        day_now = today_dt.day
+        year_now = today_dt.year
+        month_now = today_dt.month
+
+        if day_now >= start_day:
+            max_days = calendar.monthrange(year_now, month_now)[1]
+            actual_day = min(start_day, max_days)
+            cycle_start_dt = date(year_now, month_now, actual_day)
+
+            next_m = (month_now % 12) + 1
+            next_y = year_now + (1 if month_now == 12 else 0)
+            next_max_days = calendar.monthrange(next_y, next_m)[1]
+            next_cycle_dt = date(next_y, next_m, min(start_day, next_max_days))
+        else:
+            prev_m = 12 if month_now == 1 else month_now - 1
+            prev_y = year_now - 1 if month_now == 1 else year_now
+            prev_max_days = calendar.monthrange(prev_y, prev_m)[1]
+            cycle_start_dt = date(prev_y, prev_m, min(start_day, prev_max_days))
+
+            next_max_days = calendar.monthrange(year_now, month_now)[1]
+            next_cycle_dt = date(year_now, month_now, min(start_day, next_max_days))
+
+        cycle_start_str = cycle_start_dt.strftime("%Y-%m-%d")
+        days_left = (next_cycle_dt - today_dt.date()).days
+        days_in_cycle = max(1, (next_cycle_dt - cycle_start_dt).days)
+
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date >= ?", (cycle_start_str,))
+    rx_tx = c.fetchone()
+    used_bytes = (rx_tx[0] or 0) + (rx_tx[1] or 0)
+    remaining_bytes = max(0, limit_bytes - used_bytes)
+    percentage = (used_bytes / limit_bytes * 100) if limit_bytes > 0 else 0
+
+    # Daily Quota Calculation (Default: monthly quota divided by days in billing cycle)
+    is_daily_auto = (daily_limit_b == 0 or daily_limit_b is None)
+    effective_daily_limit = (limit_bytes // days_in_cycle) if is_daily_auto else daily_limit_b
+
+    today_str = today_dt.strftime("%Y-%m-%d")
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date = ?", (today_str,))
+    today_rx_tx = c.fetchone()
+    today_used_bytes = (today_rx_tx[0] or 0) + (today_rx_tx[1] or 0)
+    daily_remaining_bytes = max(0, effective_daily_limit - today_used_bytes)
+    daily_percentage = (today_used_bytes / effective_daily_limit * 100) if effective_daily_limit > 0 else 0
+
+    return {
+        "enabled": True,
+        "period_type": period_type,
+        "cycle_id": cycle_start_str,
+        "start_day": start_day,
+        "limit": limit_bytes,
+        "used": used_bytes,
+        "remaining": remaining_bytes,
+        "percentage": percentage,
+        "days_left": days_left,
+        "days_in_cycle": days_in_cycle,
+        "warn_threshold": warn_pct,
+        "crit_threshold": crit_pct,
+        "last_warned_level": last_warn_lvl,
+        "last_warned_cycle": last_warn_cycle,
+        "daily_limit": effective_daily_limit,
+        "daily_used": today_used_bytes,
+        "daily_remaining": daily_remaining_bytes,
+        "daily_percentage": daily_percentage,
+        "daily_is_auto": is_daily_auto,
+        "daily_warn_threshold": daily_warn_pct,
+        "last_warned_daily_date": last_daily_date,
+        "last_warned_daily_level": last_daily_lvl
+    }
+
+def check_and_notify_quota(conn, q_stat):
+    if not q_stat or not q_stat.get("enabled"):
+        return
+
+    used_pct = q_stat["percentage"]
+    cycle_id = q_stat["cycle_id"]
+    last_level = q_stat["last_warned_level"]
+    last_cycle = q_stat["last_warned_cycle"]
+    warn_thr = q_stat["warn_threshold"]
+    crit_thr = q_stat["crit_threshold"]
+
+    if last_cycle != cycle_id:
+        last_level = 0
+
+    c = conn.cursor()
+
+    # Monthly notifications
+    if used_pct >= crit_thr and last_level < crit_thr:
+        try:
+            subprocess.run([
+                "notify-send", "-u", "critical", "-a", "HorusNet",
+                "HorusNet - Critical Quota Warning",
+                f"You have used {used_pct:.1f}% of your data quota ({format_bytes(q_stat['used'])} / {format_bytes(q_stat['limit'])}).\nRemaining: {format_bytes(q_stat['remaining'])}"
+            ], check=False)
+            c.execute("UPDATE quota_config SET last_warned_level = ?, last_warned_cycle = ? WHERE id = 1", (crit_thr, cycle_id))
+            conn.commit()
+        except Exception:
+            pass
+
+    elif used_pct >= warn_thr and last_level < warn_thr:
+        try:
+            subprocess.run([
+                "notify-send", "-u", "normal", "-a", "HorusNet",
+                "HorusNet - Quota Alert",
+                f"Warning: You have reached {used_pct:.1f}% of your data quota ({format_bytes(q_stat['used'])} / {format_bytes(q_stat['limit'])})."
+            ], check=False)
+            c.execute("UPDATE quota_config SET last_warned_level = ?, last_warned_cycle = ? WHERE id = 1", (warn_thr, cycle_id))
+            conn.commit()
+        except Exception:
+            pass
+
+    # Daily limit notifications
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    daily_used = q_stat["daily_used"]
+    daily_limit = q_stat["daily_limit"]
+    daily_pct = q_stat["daily_percentage"]
+    daily_warn_thr = q_stat["daily_warn_threshold"]
+    last_daily_date = q_stat["last_warned_daily_date"]
+    last_daily_lvl = q_stat["last_warned_daily_level"]
+
+    if last_daily_date != today_str:
+        last_daily_lvl = 0
+
+    if daily_limit > 0:
+        if daily_pct >= 100 and last_daily_lvl < 100:
+            try:
+                over_bytes = daily_used - daily_limit
+                subprocess.run([
+                    "notify-send", "-u", "critical", "-a", "HorusNet",
+                    "HorusNet - Daily Limit Exceeded",
+                    f"You have used {daily_pct:.1f}% and exceeded your daily limit ({format_bytes(daily_used)} / {format_bytes(daily_limit)}).\nOver limit by: +{format_bytes(over_bytes)}"
+                ], check=False)
+                c.execute("UPDATE quota_config SET last_warned_daily_level = 100, last_warned_daily_date = ? WHERE id = 1", (today_str,))
+                conn.commit()
+            except Exception:
+                pass
+        elif daily_pct >= daily_warn_thr and last_daily_lvl < daily_warn_thr:
+            try:
+                subprocess.run([
+                    "notify-send", "-u", "normal", "-a", "HorusNet",
+                    "HorusNet - Daily Usage Alert",
+                    f"Alert: You have reached {daily_pct:.1f}% of your recommended daily limit ({format_bytes(daily_used)} / {format_bytes(daily_limit)}).\nRemaining today: {format_bytes(q_stat['daily_remaining'])}"
+                ], check=False)
+                c.execute("UPDATE quota_config SET last_warned_daily_level = ?, last_warned_daily_date = ? WHERE id = 1", (daily_warn_thr, today_str))
+                conn.commit()
+            except Exception:
+                pass
+
+def import_vnstat_history(conn):
+    if not os.path.exists(VNSTAT_DB):
+        return
+    if get_config_val(conn, "vnstat_imported") == "1":
+        return
+
+    try:
+        v_conn = sqlite3.connect(VNSTAT_DB)
+        v_c = v_conn.cursor()
+        
+        # Daily stats
+        v_c.execute("SELECT interface.name, day.date, day.rx, day.tx FROM day JOIN interface ON day.interface = interface.id")
+        c = conn.cursor()
+        for iface, date_str, rx, tx in v_c.fetchall():
+            if rx > 0 or tx > 0:
+                c.execute("""
+                    INSERT INTO daily_stats (date, interface, rx, tx)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(date, interface) DO UPDATE SET
+                    rx = MAX(rx, excluded.rx),
+                    tx = MAX(tx, excluded.tx)
+                """, (date_str, iface, rx, tx))
+
+        # Hourly stats
+        v_c.execute("SELECT interface.name, hour.date, hour.rx, hour.tx FROM hour JOIN interface ON hour.interface = interface.id")
+        for iface, dt_str, rx, tx in v_c.fetchall():
+            if rx > 0 or tx > 0:
+                d_str = dt_str[:10]
+                h_int = int(dt_str[11:13])
+                c.execute("""
+                    INSERT INTO hourly_stats (date, hour, interface, rx, tx)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(date, hour, interface) DO UPDATE SET
+                    rx = MAX(rx, excluded.rx),
+                    tx = MAX(tx, excluded.tx)
+                """, (d_str, h_int, iface, rx, tx))
+
+        v_conn.close()
+        set_config_val(conn, "vnstat_imported", "1")
+    except Exception:
+        pass
+
+def update_traffic(conn):
+    import_vnstat_history(conn)
+    current_net = read_proc_net_dev()
+    boot_id = get_boot_id()
+    now_dt = datetime.now()
+    today = now_dt.strftime("%Y-%m-%d")
+    current_hour = now_dt.hour
+    now_ts = time.time()
+    
+    c = conn.cursor()
+    c.execute("SELECT interface, boot_id, last_rx, last_tx FROM state")
+    saved_states = {row[0]: {"boot_id": row[1], "last_rx": row[2], "last_tx": row[3]} for row in c.fetchall()}
+
+    for iface, counters in current_net.items():
+        curr_rx = counters["rx"]
+        curr_tx = counters["tx"]
+        
+        if iface in saved_states:
+            prev = saved_states[iface]
+            if prev["boot_id"] == boot_id and curr_rx >= prev["last_rx"] and curr_tx >= prev["last_tx"]:
+                delta_rx = curr_rx - prev["last_rx"]
+                delta_tx = curr_tx - prev["last_tx"]
+            else:
+                delta_rx = curr_rx
+                delta_tx = curr_tx
+        else:
+            delta_rx = curr_rx
+            delta_tx = curr_tx
+
+        if delta_rx > 0 or delta_tx > 0:
+            c.execute("""
+                INSERT INTO daily_stats (date, interface, rx, tx)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(date, interface) DO UPDATE SET
+                rx = rx + excluded.rx,
+                tx = tx + excluded.tx
+            """, (today, iface, delta_rx, delta_tx))
+
+            c.execute("""
+                INSERT INTO hourly_stats (date, hour, interface, rx, tx)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(date, hour, interface) DO UPDATE SET
+                rx = rx + excluded.rx,
+                tx = tx + excluded.tx
+            """, (today, current_hour, iface, delta_rx, delta_tx))
+
+        c.execute("""
+            INSERT INTO state (interface, boot_id, last_rx, last_tx, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(interface) DO UPDATE SET
+            boot_id = excluded.boot_id,
+            last_rx = excluded.last_rx,
+            last_tx = excluded.last_tx,
+            updated_at = excluded.updated_at
+        """, (iface, boot_id, curr_rx, curr_tx, now_ts))
+
+    conn.commit()
+
+    # Track application history and daily duration
+    update_apps_history(conn)
+
+    q_stat = get_quota_status(conn)
+    check_and_notify_quota(conn, q_stat)
+
+# ----------------------------------------------------
+# Application & Socket Discovery Engine
+# ----------------------------------------------------
+
+def get_process_network_info():
+    """Discovers running apps with active network sockets and reads their real network transfer metrics via ss -tupina"""
+    apps = {}
+    try:
+        res = subprocess.run(["ss", "-tupina"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        lines = res.stdout.strip().split("\n")
+        current_sock = None
+
+        for line in lines:
+            if line.startswith('\t') or line.startswith('   '):
+                if current_sock:
+                    rx_m = re.search(r'bytes_received:(\d+)', line)
+                    tx_m = re.search(r'bytes_sent:(\d+)', line)
+                    if rx_m:
+                        current_sock['rx'] = int(rx_m.group(1))
+                    if tx_m:
+                        current_sock['tx'] = int(tx_m.group(1))
+                continue
+
+            parts = line.split()
+            if len(parts) < 5 or parts[0].lower() in ('netid', 'state'):
+                current_sock = None
+                continue
+
+            proto = parts[0].upper()
+            state = parts[1].upper()
+            recv_q = parts[2]
+            send_q = parts[3]
+            local_addr = parts[4]
+            peer_addr = parts[5] if len(parts) > 5 and not parts[5].startswith('users:') else "*:*"
+
+            user_matches = re.findall(r'\"([^\"]+)\",pid=(\d+)(?:,fd=(\d+))?', line)
+            if not user_matches:
+                current_sock = None
+                continue
+
+            app_name, pid_str, fd_str = user_matches[0]
+            pid = int(pid_str)
+            fd = fd_str if fd_str else "-"
+
+            # Resolve service name if possible
+            peer_port_match = re.search(r':(\d+)$', peer_addr)
+            service_tag = ""
+            if peer_port_match:
+                p_num = int(peer_port_match.group(1))
+                if p_num in PORT_SERVICES:
+                    service_tag = f" ({PORT_SERVICES[p_num]})"
+
+            is_local = (
+                peer_addr.startswith("127.") or 
+                peer_addr.startswith("::1") or 
+                peer_addr.startswith("0.0.0.0") or 
+                peer_addr.startswith("*") or
+                peer_addr.startswith("[::1]") or
+                peer_addr.startswith("[::]")
+            )
+
+            current_sock = {
+                "proto": proto,
+                "state": state,
+                "local": local_addr,
+                "peer": peer_addr + service_tag,
+                "recv_q": recv_q,
+                "send_q": send_q,
+                "pid": pid,
+                "fd": fd,
+                "rx": 0,
+                "tx": 0,
+                "is_local": is_local
+            }
+
+            if app_name not in apps:
+                apps[app_name] = {
+                    "name": app_name,
+                    "pids": set(),
+                    "sockets": [],
+                    "rss_bytes": 0,
+                    "io_read_bytes": 0,
+                    "io_write_bytes": 0,
+                    "exe_path": "unknown",
+                    "cmdline": "",
+                    "net_rx": 0,
+                    "net_tx": 0,
+                    "net_total": 0,
+                    "total_rx": 0,
+                    "total_tx": 0,
+                    "grand_total": 0
+                }
+
+            apps[app_name]["pids"].add(pid)
+            apps[app_name]["sockets"].append(current_sock)
+
+    except Exception:
+        pass
+
+    # Read /proc details for discovered processes and sum metrics
+    for app_name, app_data in apps.items():
+        # Sum network metrics
+        app_data["total_rx"] = sum(s["rx"] for s in app_data["sockets"])
+        app_data["total_tx"] = sum(s["tx"] for s in app_data["sockets"])
+        app_data["net_rx"] = sum(s["rx"] for s in app_data["sockets"] if not s["is_local"])
+        app_data["net_tx"] = sum(s["tx"] for s in app_data["sockets"] if not s["is_local"])
+        app_data["net_total"] = app_data["net_rx"] + app_data["net_tx"]
+        app_data["grand_total"] = app_data["total_rx"] + app_data["total_tx"]
+
+        primary_pid = list(app_data["pids"])[0] if app_data["pids"] else None
+
+        if primary_pid and os.path.exists(f"/proc/{primary_pid}"):
+            try:
+                app_data["exe_path"] = os.readlink(f"/proc/{primary_pid}/exe")
+            except Exception:
+                app_data["exe_path"] = "unknown"
+
+            try:
+                with open(f"/proc/{primary_pid}/cmdline", "r", encoding="utf-8", errors="ignore") as f:
+                    app_data["cmdline"] = f.read().replace('\0', ' ').strip()
+            except Exception:
+                app_data["cmdline"] = app_name
+
+        total_rss = 0
+        total_read = 0
+        total_write = 0
+        for pid in app_data["pids"]:
+            try:
+                with open(f"/proc/{pid}/status", "r") as f:
+                    for s_line in f:
+                        if s_line.startswith("VmRSS:"):
+                            parts = s_line.split()
+                            if len(parts) >= 2:
+                                total_rss += int(parts[1]) * 1024
+                            break
+            except Exception:
+                pass
+
+            try:
+                with open(f"/proc/{pid}/io", "r") as f:
+                    for io_line in f:
+                        if io_line.startswith("read_bytes:"):
+                            total_read += int(io_line.split()[1])
+                        elif io_line.startswith("write_bytes:"):
+                            total_write += int(io_line.split()[1])
+            except Exception:
+                pass
+
+        app_data["rss_bytes"] = total_rss
+        app_data["io_read_bytes"] = total_read
+        app_data["io_write_bytes"] = total_write
+
+    return apps
+
+def update_apps_history(conn, apps_dict=None):
+    """Updates daily bandwidth usage and active runtime duration for apps in SQLite app_daily_stats"""
+    if apps_dict is None:
+        apps_dict = get_process_network_info()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    now_ts = time.time()
+    now_dt = datetime.now()
+    midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    sec_since_midnight = max(1, int((now_dt - midnight).total_seconds()))
+
+    c = conn.cursor()
+
+    for app_name, app_data in apps_dict.items():
+        curr_rx = app_data.get("net_rx", 0)
+        curr_tx = app_data.get("net_tx", 0)
+        if curr_rx == 0 and curr_tx == 0 and app_data.get("grand_total", 0) > 0:
+            curr_rx = app_data.get("total_rx", 0)
+            curr_tx = app_data.get("total_tx", 0)
+
+        # Check app_state
+        c.execute("SELECT last_rx, last_tx, last_seen FROM app_state WHERE app_name = ?", (app_name,))
+        state_row = c.fetchone()
+
+        if state_row is not None:
+            last_rx, last_tx, last_seen = state_row
+            delta_rx = (curr_rx - last_rx) if curr_rx >= last_rx else curr_rx
+            delta_tx = (curr_tx - last_tx) if curr_tx >= last_tx else curr_tx
+        else:
+            delta_rx = curr_rx
+            delta_tx = curr_tx
+
+        # Calculate active runtime duration today
+        pids = app_data.get("pids", set())
+        app_running_seconds = 0
+        if pids:
+            max_runtime = max((get_pid_runtime(p) for p in pids), default=0)
+            app_running_seconds = min(max_runtime, sec_since_midnight)
+
+        # Get existing daily stats for today
+        c.execute("SELECT active_seconds, last_seen FROM app_daily_stats WHERE date = ? AND app_name = ?", (today, app_name))
+        daily_row = c.fetchone()
+
+        if daily_row:
+            old_active, old_seen = daily_row
+            if app_running_seconds > old_active:
+                new_active = app_running_seconds
+            else:
+                elapsed_since_seen = int(now_ts - old_seen) if old_seen else 0
+                if 0 < elapsed_since_seen <= 600:
+                    new_active = min(sec_since_midnight, old_active + elapsed_since_seen)
+                else:
+                    new_active = old_active
+        else:
+            new_active = app_running_seconds
+
+        # Upsert app_daily_stats
+        c.execute("""
+            INSERT INTO app_daily_stats (date, app_name, rx, tx, active_seconds, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date, app_name) DO UPDATE SET
+            rx = rx + excluded.rx,
+            tx = tx + excluded.tx,
+            active_seconds = excluded.active_seconds,
+            last_seen = excluded.last_seen
+        """, (today, app_name, delta_rx, delta_tx, new_active, now_ts))
+
+        # Update app_state
+        c.execute("""
+            INSERT INTO app_state (app_name, last_rx, last_tx, last_seen)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(app_name) DO UPDATE SET
+            last_rx = excluded.last_rx,
+            last_tx = excluded.last_tx,
+            last_seen = excluded.last_seen
+        """, (app_name, curr_rx, curr_tx, now_ts))
+
+    conn.commit()
+
+
+# ----------------------------------------------------
+# Presentation Views
+# ----------------------------------------------------
+
+def show_summary(conn):
+    update_traffic(conn)
+    branding = load_branding()
+    th = get_theme(conn)
+    c = conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    this_month = datetime.now().strftime("%Y-%m")
+
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date = ?", (today,))
+    row = c.fetchone()
+    today_rx, today_tx = (row[0] or 0), (row[1] or 0)
+
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date = ?", (yesterday,))
+    row = c.fetchone()
+    yest_rx, yest_tx = (row[0] or 0), (row[1] or 0)
+
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date LIKE ?", (f"{this_month}%",))
+    row = c.fetchone()
+    month_rx, month_tx = (row[0] or 0), (row[1] or 0)
+
+    curr_net = read_proc_net_dev()
+    session_rx = sum(v["rx"] for v in curr_net.values())
+    session_tx = sum(v["tx"] for v in curr_net.values())
+
+    iface_info = get_interfaces_info()
+    tagline = branding.get(f"tagline_{get_lang(conn)}", branding["name"])
+
+    print(f"\n{CLR_BOLD}{th['primary']}[ {branding['name']} ] - {tagline} ({datetime.now().strftime('%Y-%m-%d %H:%M')}){CLR_RESET}")
+    print(f"{th['dim']}─────────────────────────────────────────────────────────────────{CLR_RESET}")
+    
+    col_p = t(conn, "period")
+    col_d = t(conn, "download")
+    col_u = t(conn, "upload")
+    col_t = t(conn, "total")
+
+    print(f"{col_p:<20} | {col_d:<17} | {col_u:<17} | {col_t:<17}")
+    print(f"{'─'*20}─+─{'─'*17}─+─{'─'*17}─+─{'─'*17}")
+    print(f"{t(conn, 'today'):<20} | {format_bytes(today_rx):<17} | {format_bytes(today_tx):<17} | {CLR_BOLD}{th['accent']}{format_bytes(today_rx + today_tx):<17}{CLR_RESET}")
+    print(f"{t(conn, 'yesterday'):<20} | {format_bytes(yest_rx):<17} | {format_bytes(yest_tx):<17} | {format_bytes(yest_rx + yest_tx):<17}")
+    print(f"{t(conn, 'this_month'):<20} | {format_bytes(month_rx):<17} | {format_bytes(month_tx):<17} | {CLR_BOLD}{th['highlight']}{format_bytes(month_rx + month_tx):<17}{CLR_RESET}")
+    print(f"{t(conn, 'session'):<20} | {format_bytes(session_rx):<17} | {format_bytes(session_tx):<17} | {format_bytes(session_rx + session_tx):<17}")
+    print(f"{th['dim']}─────────────────────────────────────────────────────────────────{CLR_RESET}")
+
+    # Data Quota Progress Gauge (if enabled)
+    q_stat = get_quota_status(conn)
+    if q_stat.get("enabled"):
+        pct = q_stat["percentage"]
+        used_b = q_stat["used"]
+        limit_b = q_stat["limit"]
+        rem_b = q_stat["remaining"]
+        days_left = q_stat["days_left"]
+
+        bar_len = 28
+        filled_len = min(bar_len, int((pct / 100.0) * bar_len))
+        color_gauge = th['accent'] if pct < 80 else (CLR_YELLOW if pct < 95 else CLR_RED)
+        bar_str = "█" * filled_len + "░" * (bar_len - filled_len)
+
+        print(f"{CLR_BOLD}● {t(conn, 'quota_gauge_title')}:{CLR_RESET} {format_bytes(used_b)} / {format_bytes(limit_b)} ({pct:.1f}%)")
+        if pct <= 100:
+            print(f"  [{color_gauge}{bar_str}{CLR_RESET}] {t(conn, 'quota_remaining')}: {CLR_BOLD}{format_bytes(rem_b)}{CLR_RESET} ({days_left} {t(conn, 'quota_days_left')})")
+        else:
+            exceeded = used_b - limit_b
+            print(f"  [{CLR_RED}{bar_str}{CLR_RESET}] {CLR_RED}{CLR_BOLD}{t(conn, 'quota_exceeded')} +{format_bytes(exceeded)}{CLR_RESET} ({days_left} {t(conn, 'quota_days_left')})")
+
+        # Daily Quota Limit Gauge
+        d_limit = q_stat.get("daily_limit", 0)
+        if d_limit > 0:
+            d_used = q_stat.get("daily_used", 0)
+            d_pct = q_stat.get("daily_percentage", 0)
+            d_rem = q_stat.get("daily_remaining", 0)
+            d_auto_tag = f" ({t(conn, 'daily_auto_label')})" if q_stat.get("daily_is_auto") else f" ({t(conn, 'daily_custom_label')})"
+
+            d_filled = min(bar_len, int((d_pct / 100.0) * bar_len))
+            d_warn_thr = q_stat.get("daily_warn_threshold", 80)
+            d_color = th['accent'] if d_pct < d_warn_thr else (CLR_YELLOW if d_pct < 100 else CLR_RED)
+            d_bar = "█" * d_filled + "░" * (bar_len - d_filled)
+
+            print(f"{CLR_BOLD}● {t(conn, 'daily_limit_title')}:{CLR_RESET} {format_bytes(d_used)} / {format_bytes(d_limit)} ({d_pct:.1f}%){th['dim']}{d_auto_tag}{CLR_RESET}")
+            if d_pct <= 100:
+                print(f"  [{d_color}{d_bar}{CLR_RESET}] {t(conn, 'quota_remaining')}: {CLR_BOLD}{format_bytes(d_rem)}{CLR_RESET}")
+            else:
+                d_over = d_used - d_limit
+                print(f"  [{CLR_RED}{d_bar}{CLR_RESET}] {CLR_RED}{CLR_BOLD}{t(conn, 'daily_exceeded')} +{format_bytes(d_over)}{CLR_RESET}")
+        print(f"{th['dim']}─────────────────────────────────────────────────────────────────{CLR_RESET}")
+
+    print(f"{CLR_BOLD}● {t(conn, 'interfaces_title')}{CLR_RESET}")
+    for iface, data in curr_net.items():
+        total_iface = data["rx"] + data["tx"]
+        info = iface_info.get(iface, {"status": "UNKNOWN", "ip": "none"})
+        status_col = th["accent"] if info["status"] in ["UP", "UNKNOWN"] and total_iface > 0 else th["dim"]
+        print(f"  * {status_col}{iface:<16}{CLR_RESET} [IP: {info['ip']:<17}] Total: {CLR_BOLD}{format_bytes(total_iface)}{CLR_RESET} (▼ {format_bytes(data['rx'])} / ▲ {format_bytes(data['tx'])})")
+    print()
+
+def show_hourly(conn, target_date=None):
+    update_traffic(conn)
+    th = get_theme(conn)
+    current_date = target_date or datetime.now().strftime("%Y-%m-%d")
+    interactive_mode = sys.stdin.isatty() and target_date is None
+
+    while True:
+        c = conn.cursor()
+        c.execute("""
+            SELECT hour, SUM(rx), SUM(tx)
+            FROM hourly_stats
+            WHERE date = ?
+            GROUP BY hour
+            ORDER BY hour ASC
+        """, (current_date,))
+        rows = c.fetchall()
+
+        sys.stdout.write(CLR_CLEAR_SCREEN)
+        print(f"\n{CLR_BOLD}{th['primary']}[ {t(conn, 'hourly_title')} ] - ({current_date}){CLR_RESET}")
+        
+        if not rows:
+            print(f"\n{th['dim']}{t(conn, 'no_data')} ({current_date}){CLR_RESET}\n")
+        else:
+            max_hourly = max((r[1] + r[2]) for r in rows) if rows else 1
+            max_hourly = max(max_hourly, 1)
+
+            peak_hour, peak_val = None, 0
+
+            print(f"{th['dim']}┌─────────┬──────────────────┬──────────────────┬──────────────────┬────────────────────────┐{CLR_RESET}")
+            print(f"{th['dim']}│{CLR_RESET} {t(conn, 'hour'):^7} {th['dim']}│{CLR_RESET} {t(conn, 'download'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'upload'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'total'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'chart'):^22} {th['dim']}│{CLR_RESET}")
+            print(f"{th['dim']}├─────────┼──────────────────┼──────────────────┼──────────────────┼────────────────────────┤{CLR_RESET}")
+
+            total_day_rx, total_day_tx = 0, 0
+            for h, rx, tx in rows:
+                tot = rx + tx
+                total_day_rx += rx
+                total_day_tx += tx
+
+                if tot > peak_val:
+                    peak_val = tot
+                    peak_hour = h
+
+                bar_len = 20
+                filled = min(bar_len, int((tot / max_hourly) * bar_len))
+                bar_color = th['highlight'] if tot == max_hourly else th['accent']
+                bar_str = "█" * filled + "░" * (bar_len - filled)
+
+                h_label = f"{h:02d}:00"
+                print(f"{th['dim']}│{CLR_RESET} {h_label:^7} {th['dim']}│{CLR_RESET} {format_bytes(rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{format_bytes(tot):>16}{CLR_RESET} {th['dim']}│{CLR_RESET} [{bar_color}{bar_str}{CLR_RESET}] {th['dim']}│{CLR_RESET}")
+
+            print(f"{th['dim']}├─────────┼──────────────────┼──────────────────┼──────────────────┼────────────────────────┤{CLR_RESET}")
+            print(f"{th['dim']}│{CLR_RESET} {CLR_BOLD}{t(conn, 'sum'):^7}{CLR_RESET} {th['dim']}│{CLR_RESET} {format_bytes(total_day_rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(total_day_tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{th['highlight']}{format_bytes(total_day_rx + total_day_tx):>16}{CLR_RESET} {th['dim']}│{CLR_RESET} {'':^22} {th['dim']}│{CLR_RESET}")
+            print(f"{th['dim']}└─────────┴──────────────────┴──────────────────┴──────────────────┴────────────────────────┘{CLR_RESET}")
+
+            if peak_hour is not None and peak_val > 0:
+                print(f"\n{CLR_BOLD}⚡ {t(conn, 'peak_hour')}:{CLR_RESET} {peak_hour:02d}:00 - {peak_hour+1:02d}:00 ({CLR_BOLD}{th['accent']}{format_bytes(peak_val)}{CLR_RESET})")
+
+        print(f"\n{th['dim']}{t(conn, 'hourly_nav_hint')}{CLR_RESET}")
+        sys.stdout.flush()
+
+        if not interactive_mode:
+            break
+
+        key = get_key()
+        curr_dt = datetime.strptime(current_date, "%Y-%m-%d")
+
+        if key in ('LEFT', 'p', 'P', '1'):
+            current_date = (curr_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        elif key in ('RIGHT', 'n', 'N', '2'):
+            current_date = (curr_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        elif key in ('ESC', 'ENTER', 'SPACE', 'QUIT', 'CTRL_C'):
+            break
+
+def inspect_app_details(conn, app_info):
+    """Clean Application Inspection View: shows daily usage history, active runtime duration, and bandwidth stats across days without raw socket microdata."""
+    th = get_theme(conn)
+    app_name = app_info["name"]
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    while True:
+        all_apps = get_process_network_info()
+        update_apps_history(conn, all_apps)
+        current_app = all_apps.get(app_name, app_info)
+
+        c = conn.cursor()
+
+        # Get device total today for calculating percentage share
+        c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date = ?", (today,))
+        dev_today_row = c.fetchone()
+        dev_today_tot = ((dev_today_row[0] or 0) + (dev_today_row[1] or 0)) if dev_today_row else 0
+
+        # Query daily history for this application (last 30 days)
+        c.execute("""
+            SELECT date, rx, tx, active_seconds
+            FROM app_daily_stats
+            WHERE app_name = ?
+            ORDER BY date DESC
+            LIMIT 30
+        """, (app_name,))
+        daily_rows = c.fetchall()
+
+        # Query all-time cumulative total for this application
+        c.execute("SELECT SUM(rx), SUM(tx), SUM(active_seconds) FROM app_daily_stats WHERE app_name = ?", (app_name,))
+        cum_row = c.fetchone()
+        cum_rx = (cum_row[0] or 0) if cum_row else 0
+        cum_tx = (cum_row[1] or 0) if cum_row else 0
+        cum_active = (cum_row[2] or 0) if cum_row else 0
+        cum_tot = cum_rx + cum_tx
+
+        # Today's application metrics
+        today_entry = next((r for r in daily_rows if r[0] == today), None)
+        today_rx = today_entry[1] if today_entry else current_app.get("net_rx", 0)
+        today_tx = today_entry[2] if today_entry else current_app.get("net_tx", 0)
+        today_tot = today_rx + today_tx
+        today_active_sec = today_entry[3] if today_entry else 0
+
+        # Calculate active duration if currently running
+        pids = current_app.get("pids", set())
+        if pids:
+            now_dt = datetime.now()
+            midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            sec_since_midnight = max(1, int((now_dt - midnight).total_seconds()))
+            proc_runtime = max((get_pid_runtime(p) for p in pids), default=0)
+            today_active_sec = max(today_active_sec, min(proc_runtime, sec_since_midnight))
+
+        is_running = len(pids) > 0
+        running_status_str = f"{th['accent']}Active ({len(pids)} processes){CLR_RESET}" if is_running else f"{th['dim']}Inactive{CLR_RESET}"
+
+        share_today_pct = (today_tot / dev_today_tot * 100) if dev_today_tot > 0 else 0
+
+        sys.stdout.write(CLR_CLEAR_SCREEN)
+        print(f"\n{CLR_BOLD}{th['border']}╔═══════════════════════════════════════════════════════════════════════════════════════════╗{CLR_RESET}")
+        title_line = f"║                  [ {t(conn, 'app_detail_title')}: {app_name} ]"
+        title_line = title_line[:89].ljust(89) + "║"
+        print(f"{CLR_BOLD}{th['primary']}{title_line}{CLR_RESET}")
+        print(f"{CLR_BOLD}{th['border']}╚═══════════════════════════════════════════════════════════════════════════════════════════╝{CLR_RESET}")
+
+        exe_display = current_app.get("exe_path", "unknown")
+        print(f"  ● {CLR_BOLD}{t(conn, 'exe_path_label')}{CLR_RESET} {th['accent']}{exe_display}{CLR_RESET}")
+        print(f"  ● {CLR_BOLD}{t(conn, 'app_status_label')}{CLR_RESET} {running_status_str}  |  {CLR_BOLD}{t(conn, 'active_runtime_label')}{CLR_RESET} {CLR_BOLD}{th['highlight']}{format_duration(today_active_sec, get_lang(conn))}{CLR_RESET}")
+        print(f"  ● {CLR_BOLD}{t(conn, 'usage_today_label')}{CLR_RESET} ▼ {CLR_BOLD}{th['accent']}{format_bytes(today_rx)}{CLR_RESET} Down  |  ▲ {CLR_BOLD}{th['secondary']}{format_bytes(today_tx)}{CLR_RESET} Up  |  ● Total: {CLR_BOLD}{th['highlight']}{format_bytes(today_tot)}{CLR_RESET}")
+        print(f"  ● {CLR_BOLD}{t(conn, 'share_today_label')}{CLR_RESET} {th['accent']}{share_today_pct:.1f}%{CLR_RESET} of total device traffic ({format_bytes(dev_today_tot)})")
+        print(f"  ● {CLR_BOLD}{t(conn, 'cum_traffic_label')}{CLR_RESET} {CLR_BOLD}{format_bytes(cum_tot)}{CLR_RESET} (Runtime: {format_duration(cum_active, get_lang(conn))})")
+        print(f"{th['dim']}─────────────────────────────────────────────────────────────────────────────────────────────{CLR_RESET}")
+
+        print(f"\n{CLR_BOLD}{th['primary']}[ {t(conn, 'app_history_title')} ]{CLR_RESET}")
+        print(f"{th['dim']}┌────────────┬──────────────────┬──────────────────┬──────────────────┬────────────────┬──────────────┐{CLR_RESET}")
+        print(f"{th['dim']}│{CLR_RESET} {t(conn, 'col_date'):^10} {th['dim']}│{CLR_RESET} {t(conn, 'col_down'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'col_up'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'col_tot'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'col_runtime'):^14} {th['dim']}│{CLR_RESET} {t(conn, 'col_share'):^12} {th['dim']}│{CLR_RESET}")
+        print(f"{th['dim']}├────────────┼──────────────────┼──────────────────┼──────────────────┼────────────────┼──────────────┤{CLR_RESET}")
+
+        if not daily_rows:
+            duration_txt = format_duration(today_active_sec, get_lang(conn))
+            pct_txt = f"{share_today_pct:.1f}%" if dev_today_tot > 0 else "--"
+            print(f"{th['dim']}│{CLR_RESET} {today:^10} {th['dim']}│{CLR_RESET} {format_bytes(today_rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(today_tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{format_bytes(today_tot):>16}{CLR_RESET} {th['dim']}│{CLR_RESET} {duration_txt:^14} {th['dim']}│{CLR_RESET} {pct_txt:^12} {th['dim']}│{CLR_RESET}")
+        else:
+            for d_str, d_rx, d_tx, d_sec in daily_rows:
+                if d_str == today:
+                    d_rx = max(d_rx, today_rx)
+                    d_tx = max(d_tx, today_tx)
+                    d_sec = max(d_sec, today_active_sec)
+
+                d_tot = d_rx + d_tx
+                d_duration = format_duration(d_sec, get_lang(conn))
+
+                c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date = ?", (d_str,))
+                dev_d_row = c.fetchone()
+                dev_d_tot = ((dev_d_row[0] or 0) + (dev_d_row[1] or 0)) if dev_d_row else 0
+                day_share = (d_tot / dev_d_tot * 100) if dev_d_tot > 0 else 0
+                day_share_str = f"{day_share:.1f}%" if dev_d_tot > 0 else "--"
+
+                date_label = f"{th['accent']}{d_str}{CLR_RESET}" if d_str == today else d_str
+                print(f"{th['dim']}│{CLR_RESET} {date_label:^10} {th['dim']}│{CLR_RESET} {format_bytes(d_rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(d_tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{format_bytes(d_tot):>16}{CLR_RESET} {th['dim']}│{CLR_RESET} {d_duration:^14} {th['dim']}│{CLR_RESET} {day_share_str:^12} {th['dim']}│{CLR_RESET}")
+
+        print(f"{th['dim']}├────────────┼──────────────────┼──────────────────┼──────────────────┼────────────────┼──────────────┤{CLR_RESET}")
+        print(f"{th['dim']}│{CLR_RESET} {CLR_BOLD}{'Total':^10}{CLR_RESET} {th['dim']}│{CLR_RESET} {format_bytes(cum_rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(cum_tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{th['highlight']}{format_bytes(cum_tot):>16}{CLR_RESET} {th['dim']}│{CLR_RESET} {format_duration(cum_active, get_lang(conn)):^14} {th['dim']}│{CLR_RESET} {'--':^12} {th['dim']}│{CLR_RESET}")
+        print(f"{th['dim']}└────────────┴──────────────────┴──────────────────┴──────────────────┴────────────────┴──────────────┘{CLR_RESET}")
+
+        print(f"\n{th['dim']}{t(conn, 'app_refresh_hint')}{CLR_RESET}")
+        sys.stdout.flush()
+
+        if not sys.stdin.isatty():
+            break
+
+        key = get_key()
+        if key in ('r', 'R'):
+            continue
+        elif key in ('ESC', 'ENTER', 'SPACE', 'QUIT', 'CTRL_C', 'BACK'):
+            break
+
+def show_applications(conn):
+    """Main Applications View: lists all apps with network activity, showing today's usage and daily active duration."""
+    update_traffic(conn)
+    th = get_theme(conn)
+    selected_idx = 0
+    fetch_apps = True
+    apps_list = []
+    need_full_clear = True
+
+    sys.stdout.write(CURSOR_HIDE)
+    sys.stdout.flush()
+
+    while True:
+        if fetch_apps:
+            apps_dict = get_process_network_info()
+            update_apps_history(conn, apps_dict)
+            today = datetime.now().strftime("%Y-%m-%d")
+            c = conn.cursor()
+
+            # Gather apps from both live processes and today's app_daily_stats
+            c.execute("SELECT app_name, rx, tx, active_seconds FROM app_daily_stats WHERE date = ?", (today,))
+            today_db_apps = {row[0]: {"rx": row[1], "tx": row[2], "active_seconds": row[3]} for row in c.fetchall()}
+
+            combined_names = set(apps_dict.keys()) | set(today_db_apps.keys())
+            apps_list = []
+
+            now_dt = datetime.now()
+            midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            sec_since_midnight = max(1, int((now_dt - midnight).total_seconds()))
+
+            for name in combined_names:
+                live_data = apps_dict.get(name, {})
+                db_data = today_db_apps.get(name, {})
+
+                pids = live_data.get("pids", set())
+                is_running = len(pids) > 0
+
+                t_rx = max(db_data.get("rx", 0), live_data.get("net_rx", 0))
+                t_tx = max(db_data.get("tx", 0), live_data.get("net_tx", 0))
+                t_tot = t_rx + t_tx
+
+                proc_runtime = max((get_pid_runtime(p) for p in pids), default=0) if pids else 0
+                act_sec = max(db_data.get("active_seconds", 0), min(proc_runtime, sec_since_midnight))
+
+                apps_list.append({
+                    "name": name,
+                    "pids": pids,
+                    "exe_path": live_data.get("exe_path", "unknown"),
+                    "cmdline": live_data.get("cmdline", ""),
+                    "is_running": is_running,
+                    "today_rx": t_rx,
+                    "today_tx": t_tx,
+                    "today_total": t_tot,
+                    "active_seconds": act_sec
+                })
+
+            apps_list.sort(key=lambda a: (a["today_total"], a["active_seconds"]), reverse=True)
+            fetch_apps = False
+
+        if need_full_clear:
+            sys.stdout.write(CLR_CLEAR_SCREEN)
+            need_full_clear = False
+
+        buf = [CLR_HOME]
+        buf.append(f"\n{CLR_BOLD}{th['border']}╔═══════════════════════════════════════════════════════════════════════════════════════════╗{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        title_line = f"║                      [ {t(conn, 'apps_title')} ]"
+        title_line = title_line[:89].ljust(89) + "║"
+        buf.append(f"{CLR_BOLD}{th['primary']}{title_line}{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        buf.append(f"{CLR_BOLD}{th['border']}╚═══════════════════════════════════════════════════════════════════════════════════════════╝{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        buf.append(f"{th['dim']}  {t(conn, 'apps_nav_hint')}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+
+        if not apps_list:
+            buf.append(f"\n  {th['dim']}{t(conn, 'app_empty_msg')}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+            buf.append(f"{th['dim']}{t(conn, 'press_enter_back')}{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            sys.stdout.write("".join(buf))
+            sys.stdout.flush()
+            wait_for_enter_or_q(conn)
+            break
+
+        selected_idx = min(selected_idx, len(apps_list) - 1)
+
+        buf.append(f"  {CLR_BOLD}{th['dim']}{t(conn, 'app_col_hash'):<4} {t(conn, 'app_col_name'):<16} {t(conn, 'app_col_down'):^12} {t(conn, 'app_col_up'):^12} {t(conn, 'app_col_total'):^14} {t(conn, 'app_col_runtime'):^16} {t(conn, 'app_col_status'):^8}{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        buf.append(f"  {th['dim']}" + "─" * 86 + f"{CLR_RESET}{CLR_CLEAR_LINE}\n")
+
+        for idx, app in enumerate(apps_list):
+            name_display = app['name'][:15]
+            down_txt = format_bytes(app['today_rx'])
+            up_txt = format_bytes(app['today_tx'])
+            tot_txt = format_bytes(app['today_total'])
+            dur_txt = format_duration(app['active_seconds'], get_lang(conn))
+            status_txt = f"{th['accent']}{t(conn, 'app_status_active')}{CLR_RESET}" if app['is_running'] else f"{th['dim']}{t(conn, 'app_status_inactive')}{CLR_RESET}"
+
+            item_line = f"[{idx+1:<2}] {name_display:<16} {down_txt:>10}   {up_txt:>10}   {tot_txt:>12}   {dur_txt:^16}   {status_txt:^8}"
+
+            if idx == selected_idx:
+                buf.append(f"  {CLR_BOLD}{th['accent']}❯ {CLR_REVERSE} {item_line} {CLR_RESET}{CLR_CLEAR_LINE}\n")
+            else:
+                buf.append(f"    {item_line}{CLR_CLEAR_LINE}\n")
+
+        buf.append(f"\n{th['dim']}" + "─" * 90 + f"{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        buf.append(f"{th['dim']}  {t(conn, 'app_footer_hint')}{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        sys.stdout.write("".join(buf))
+        sys.stdout.flush()
+
+        if not sys.stdin.isatty():
+            break
+
+        key = get_key()
+        triggered_app = None
+
+        if key == 'UP':
+            selected_idx = (selected_idx - 1) % len(apps_list)
+        elif key == 'DOWN':
+            selected_idx = (selected_idx + 1) % len(apps_list)
+        elif key in ('r', 'R'):
+            fetch_apps = True
+            need_full_clear = True
+        elif key in ('ESC', 'QUIT', 'CTRL_C'):
+            break
+        elif key.isdigit():
+            idx_num = int(key) - 1
+            if 0 <= idx_num < len(apps_list):
+                selected_idx = idx_num
+                triggered_app = apps_list[idx_num]
+        elif key in ('ENTER', 'SPACE'):
+            triggered_app = apps_list[selected_idx]
+
+        if triggered_app:
+            inspect_app_details(conn, triggered_app)
+            fetch_apps = True
+            need_full_clear = True
+
+def show_daily(conn, limit=14):
+    update_traffic(conn)
+    th = get_theme(conn)
+    c = conn.cursor()
+    c.execute("""
+        SELECT date, SUM(rx), SUM(tx)
+        FROM daily_stats
+        GROUP BY date
+        ORDER BY date DESC
+        LIMIT ?
+    """, (limit,))
+    rows = c.fetchall()
+
+    if not rows:
+        print(f"\n{t(conn, 'no_data')}\n")
+        return
+
+    print(f"\n{CLR_BOLD}{th['primary']}[ {t(conn, 'daily_title')} ] - ({len(rows)}){CLR_RESET}")
+    print(f"{th['dim']}┌────────────┬──────────────────┬──────────────────┬──────────────────┬──────────────┐{CLR_RESET}")
+    print(f"{th['dim']}│{CLR_RESET} {t(conn, 'date'):^10} {th['dim']}│{CLR_RESET} {t(conn, 'download'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'upload'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'total'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'status'):^12} {th['dim']}│{CLR_RESET}")
+    print(f"{th['dim']}├────────────┼──────────────────┼──────────────────┼──────────────────┼──────────────┤{CLR_RESET}")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    total_rx, total_tx = 0, 0
+    for date_str, rx, tx in rows:
+        total = rx + tx
+        total_rx += rx
+        total_tx += tx
+        tag = f"{th['accent']}{t(conn, 'today')}{CLR_RESET}" if date_str == today else ""
+        print(f"{th['dim']}│{CLR_RESET} {date_str:^10} {th['dim']}│{CLR_RESET} {format_bytes(rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{format_bytes(total):>16}{CLR_RESET} {th['dim']}│{CLR_RESET} {tag:^12} {th['dim']}│{CLR_RESET}")
+
+    print(f"{th['dim']}├────────────┼──────────────────┼──────────────────┼──────────────────┼──────────────┤{CLR_RESET}")
+    print(f"{th['dim']}│{CLR_RESET} {CLR_BOLD}{t(conn, 'sum'):^10}{CLR_RESET} {th['dim']}│{CLR_RESET} {format_bytes(total_rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(total_tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{th['highlight']}{format_bytes(total_rx + total_tx):>16}{CLR_RESET} {th['dim']}│{CLR_RESET} {'':^12} {th['dim']}│{CLR_RESET}")
+    print(f"{th['dim']}└────────────┴──────────────────┴──────────────────┴──────────────────┴──────────────┘{CLR_RESET}\n")
+
+def show_monthly(conn):
+    update_traffic(conn)
+    th = get_theme(conn)
+    c = conn.cursor()
+    c.execute("""
+        SELECT substr(date, 1, 7) as month, SUM(rx), SUM(tx)
+        FROM daily_stats
+        GROUP BY month
+        ORDER BY month DESC
+    """)
+    rows = c.fetchall()
+
+    if not rows:
+        print(f"\n{t(conn, 'no_data')}\n")
+        return
+
+    print(f"\n{CLR_BOLD}{th['primary']}[ {t(conn, 'monthly_title')} ]{CLR_RESET}")
+    print(f"{th['dim']}┌────────────┬──────────────────┬──────────────────┬──────────────────┐{CLR_RESET}")
+    print(f"{th['dim']}│{CLR_RESET} {t(conn, 'month'):^10} {th['dim']}│{CLR_RESET} {t(conn, 'download'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'upload'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'total'):^16} {th['dim']}│{CLR_RESET}")
+    print(f"{th['dim']}├────────────┼──────────────────┼──────────────────┼──────────────────┤{CLR_RESET}")
+
+    this_month = datetime.now().strftime("%Y-%m")
+    total_rx, total_tx = 0, 0
+    for month_str, rx, tx in rows:
+        total = rx + tx
+        total_rx += rx
+        total_tx += tx
+        highlight = th["accent"] if month_str == this_month else ""
+        print(f"{th['dim']}│{CLR_RESET} {highlight}{month_str:^10}{CLR_RESET} {th['dim']}│{CLR_RESET} {format_bytes(rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{format_bytes(total):>16}{CLR_RESET} {th['dim']}│{CLR_RESET}")
+
+    print(f"{th['dim']}├────────────┼──────────────────┼──────────────────┼──────────────────┤{CLR_RESET}")
+    print(f"{th['dim']}│{CLR_RESET} {CLR_BOLD}{t(conn, 'sum'):^10}{CLR_RESET} {th['dim']}│{CLR_RESET} {format_bytes(total_rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(total_tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{th['highlight']}{format_bytes(total_rx + total_tx):>16}{CLR_RESET} {th['dim']}│{CLR_RESET}")
+    print(f"{th['dim']}└────────────┴──────────────────┴──────────────────┴──────────────────┘{CLR_RESET}\n")
+
+def show_interfaces(conn):
+    update_traffic(conn)
+    th = get_theme(conn)
+    c = conn.cursor()
+    c.execute("""
+        SELECT interface, SUM(rx), SUM(tx)
+        FROM daily_stats
+        GROUP BY interface
+        ORDER BY (SUM(rx) + SUM(tx)) DESC
+    """)
+    rows = c.fetchall()
+    info = get_interfaces_info()
+    curr_net = read_proc_net_dev()
+
+    print(f"\n{CLR_BOLD}{th['primary']}[ {t(conn, 'menu_interfaces')} ]{CLR_RESET}")
+    print(f"{th['dim']}┌──────────────────┬──────────┬──────────────────┬──────────────────┬──────────────────┬──────────────────┐{CLR_RESET}")
+    print(f"{th['dim']}│{CLR_RESET} {t(conn, 'card'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'status'):^8} {th['dim']}│{CLR_RESET} {t(conn, 'ip_addr'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'history_rx'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'history_tx'):^16} {th['dim']}│{CLR_RESET} {t(conn, 'history_tot'):^16} {th['dim']}│{CLR_RESET}")
+    print(f"{th['dim']}├──────────────────┼──────────┼──────────────────┼──────────────────┼──────────────────┼──────────────────┤{CLR_RESET}")
+
+    for iface, rx, tx in rows:
+        total = rx + tx
+        if_info = info.get(iface, {"status": "DOWN", "ip": "none"})
+        status = if_info["status"]
+        status_colored = f"{th['accent']}{status:^8}{CLR_RESET}" if status in ["UP", "UNKNOWN"] and iface in curr_net else f"{th['dim']}{status:^8}{CLR_RESET}"
+        print(f"{th['dim']}│{CLR_RESET} {iface:<16} {th['dim']}│{CLR_RESET} {status_colored} {th['dim']}│{CLR_RESET} {if_info['ip']:<16} {th['dim']}│{CLR_RESET} {format_bytes(rx):>16} {th['dim']}│{CLR_RESET} {format_bytes(tx):>16} {th['dim']}│{CLR_RESET} {CLR_BOLD}{format_bytes(total):>16}{CLR_RESET} {th['dim']}│{CLR_RESET}")
+
+    print(f"{th['dim']}└──────────────────┴──────────┴──────────────────┴──────────────────┴──────────────────┴──────────────────┘{CLR_RESET}\n")
+
+def live_monitor(conn, target_iface=None):
+    th = get_theme(conn)
+    print(f"\n{CLR_BOLD}{th['primary']}[ {t(conn, 'live_title')} ]{CLR_RESET}")
+    print(f"{th['dim']}{t(conn, 'live_hint')}{CLR_RESET}\n")
+
+    def get_totals():
+        data = read_proc_net_dev()
+        if target_iface:
+            v = data.get(target_iface, {"rx": 0, "tx": 0})
+            return v["rx"], v["tx"]
+        else:
+            return sum(v["rx"] for v in data.values()), sum(v["tx"] for v in data.values())
+
+    last_rx, last_tx = get_totals()
+    last_time = time.time()
+    
+    target_name = f"{t(conn, 'iface_prefix')} {target_iface}" if target_iface else t(conn, "all_ifaces")
+    print(f"{t(conn, 'target')}: {CLR_BOLD}{target_name}{CLR_RESET}\n")
+
+    fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+    old_settings = termios.tcgetattr(fd) if fd else None
+
+    if fd:
+        tty.setraw(fd)
+
+    try:
+        while True:
+            if fd:
+                r, _, _ = select.select([fd], [], [], 1.0)
+                if r:
+                    ch = os.read(fd, 10)
+                    if ch in (b'\x1b', b'q', b'Q', b'\x03', b'\r', b'\n'):
+                        break
+            else:
+                time.sleep(1.0)
+
+            now_time = time.time()
+            curr_rx, curr_tx = get_totals()
+            
+            elapsed = now_time - last_time
+            if elapsed <= 0:
+                elapsed = 1.0
+
+            rx_speed = (curr_rx - last_rx) / elapsed
+            tx_speed = (curr_tx - last_tx) / elapsed
+
+            last_rx, last_tx = curr_rx, curr_tx
+            last_time = now_time
+
+            max_bar_width = 18
+            rx_bar_len = min(max_bar_width, int((rx_speed / (5 * 1024 * 1024)) * max_bar_width))
+            rx_bar = "█" * rx_bar_len + "░" * (max_bar_width - rx_bar_len)
+
+            tx_bar_len = min(max_bar_width, int((tx_speed / (2 * 1024 * 1024)) * max_bar_width))
+            tx_bar = "█" * tx_bar_len + "░" * (max_bar_width - tx_bar_len)
+
+            sys.stdout.write(f"\r▼ [{th['accent']}{rx_bar}{CLR_RESET}] {format_rate(rx_speed):>11}   "
+                             f"▲ [{th['secondary']}{tx_bar}{CLR_RESET}] {format_rate(tx_speed):>11}")
+            sys.stdout.flush()
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if fd and old_settings:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        print(f"\n\n{th['dim']}{t(conn, 'goodbye')}{CLR_RESET}")
+
+# ----------------------------------------------------
+# Responsive Terminal Key Engine
+# ----------------------------------------------------
+
+def get_key():
+    if not sys.stdin.isatty():
+        return 'ESC'
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        first = os.read(fd, 1)
+        if not first:
+            return None
+        if first == b'\x1b':
+            r, _, _ = select.select([fd], [], [], 0.05)
+            if r:
+                rest = os.read(fd, 16)
+                seq = first + rest
+                if seq in (b'\x1b[', b'\x1bO'):
+                    r2, _, _ = select.select([fd], [], [], 0.05)
+                    if r2:
+                        seq += os.read(fd, 8)
+                if seq in (b'\x1b[A', b'\x1bOA', b'\x1b[1;2A', b'\x1b[1;5A'):
+                    return 'UP'
+                elif seq in (b'\x1b[B', b'\x1bOB', b'\x1b[1;2B', b'\x1b[1;5B'):
+                    return 'DOWN'
+                elif seq in (b'\x1b[C', b'\x1bOC'):
+                    return 'RIGHT'
+                elif seq in (b'\x1b[D', b'\x1bOD'):
+                    return 'LEFT'
+                return 'ESC'
+            else:
+                return 'ESC'
+
+        if first in (b'\r', b'\n'):
+            return 'ENTER'
+        elif first == b' ':
+            return 'SPACE'
+        elif first == b'\x03':
+            return 'CTRL_C'
+        elif first in (b'\x7f', b'\x08'):
+            return 'BACK'
+        elif first in (b'q', b'Q'):
+            return 'QUIT'
+        elif first in (b'k', b'K'):
+            return 'UP'
+        elif first in (b'j', b'J'):
+            return 'DOWN'
+        elif first.isdigit():
+            return first.decode('utf-8', errors='ignore')
+        return first.decode('utf-8', errors='ignore')
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+def wait_for_enter_or_q(conn):
+    th = get_theme(conn)
+    print(f"\n{th['dim']}{t(conn, 'press_enter_back')}{CLR_RESET}", end="", flush=True)
+    while True:
+        k = get_key()
+        if k in ('ENTER', 'SPACE', 'ESC', 'BACK'):
+            return True
+        elif k in ('QUIT', 'CTRL_C'):
+            return False
+
+def prompt_text_input(conn, prompt_label, current_val=""):
+    th = get_theme(conn)
+    branding = load_branding()
+    sys.stdout.write(CURSOR_SHOW)
+    sys.stdout.write(CLR_CLEAR_SCREEN)
+    print(f"\n{CLR_BOLD}{th['primary']}[ {branding.get('name', 'HorusNet')} - {prompt_label} ]{CLR_RESET}")
+    cur_fmt = t(conn, "prompt_current_val").format(current_val=current_val)
+    print(f"{th['dim']}{cur_fmt}{CLR_RESET}\n")
+    print(f"{th['accent']}{t(conn, 'prompt_enter_new')}{CLR_RESET}", end="", flush=True)
+    try:
+        val = sys.stdin.readline().strip()
+        return val if val else current_val
+    except Exception:
+        return current_val
+    finally:
+        sys.stdout.write(CURSOR_HIDE)
+
+# ----------------------------------------------------
+# Settings & Theme & Quota Submenus
+# ----------------------------------------------------
+
+def quota_settings_menu(conn):
+    while True:
+        th = get_theme(conn)
+        c = conn.cursor()
+        c.execute("""
+            SELECT enabled, total_limit_bytes, cycle_start_day, warn_threshold_percent, crit_threshold_percent,
+                   daily_limit_bytes, daily_warn_percent
+            FROM quota_config WHERE id = 1
+        """)
+        row = c.fetchone()
+        enabled, limit_b, start_day, warn_pct, crit_pct, daily_limit_b, daily_warn_pct = row
+
+        status_text = t(conn, "enabled") if enabled else t(conn, "disabled")
+        limit_gb = limit_b / (1024 * 1024 * 1024)
+
+        q_stat = get_quota_status(conn)
+        effective_daily_gb = q_stat.get("daily_limit", 0) / (1024 * 1024 * 1024)
+        is_auto_daily = (daily_limit_b == 0 or daily_limit_b is None)
+        daily_label = f"{t(conn, 'daily_auto_label')} [{effective_daily_gb:.2f} GiB]" if is_auto_daily else f"{t(conn, 'daily_custom_label')} [{daily_limit_b / (1024*1024*1024):.2f} GiB]"
+
+        items = [
+            ("1", f"[1] {t(conn, 'quota_status')}: [ {status_text} ]", "toggle"),
+            ("2", f"[2] {t(conn, 'quota_limit')}: [ {limit_gb:.1f} GiB ]", "set_limit"),
+            ("3", f"[3] {t(conn, 'quota_cycle_day')}: [ {t(conn, 'quota_cycle_day_fmt').format(day=start_day)} ]", "set_day"),
+            ("4", f"[4] {t(conn, 'daily_limit_setting')}: [ {daily_label} ]", "set_daily_limit"),
+            ("5", f"[5] {t(conn, 'daily_warn_setting')}: [ {daily_warn_pct}% ]", "set_daily_warn"),
+            ("6", f"[6] {t(conn, 'quota_warn')}: [ {warn_pct}% ]", "set_warn"),
+            ("7", f"[7] {t(conn, 'quota_crit')}: [ {crit_pct}% ]", "set_crit"),
+            ("8", f"[8] {t(conn, 'quota_test_notif')}", "test_notif"),
+            ("0", f"[0] {t(conn, 'setting_back')}", "back")
+        ]
+        selected_idx = 0
+
+        sys.stdout.write(CURSOR_HIDE)
+        sys.stdout.flush()
+
+        try:
+            exit_quota = False
+            msg_banner = ""
+            sys.stdout.write(CLR_CLEAR_SCREEN)
+            while True:
+                buf = [CLR_HOME]
+                buf.append(f"{CLR_BOLD}{th['border']}╔═══════════════════════════════════════════════════════════╗{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                buf.append(f"{CLR_BOLD}{th['primary']}║               [ {t(conn, 'quota_title')} ]             ║{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                buf.append(f"{CLR_BOLD}{th['border']}╚═══════════════════════════════════════════════════════════╝{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                buf.append(f"{th['dim']}  {t(conn, 'nav_hint')}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+
+                if msg_banner:
+                    buf.append(f"  {CLR_BOLD}{th['accent']}{msg_banner}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+                    msg_banner = ""
+
+                for idx, (_, label, _) in enumerate(items):
+                    if idx == selected_idx:
+                        buf.append(f"  {CLR_BOLD}{th['accent']}❯ {CLR_REVERSE} {label} {CLR_RESET}{CLR_CLEAR_LINE}\n")
+                    else:
+                        buf.append(f"    {label}{CLR_CLEAR_LINE}\n")
+
+                buf.append(f"\n{th['dim']}─────────────────────────────────────────────────────────────{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                sys.stdout.write("".join(buf))
+                sys.stdout.flush()
+
+                key = get_key()
+                triggered_action = None
+
+                if key == 'UP':
+                    selected_idx = (selected_idx - 1) % len(items)
+                elif key == 'DOWN':
+                    selected_idx = (selected_idx + 1) % len(items)
+                elif key in ('ESC', 'QUIT', 'CTRL_C'):
+                    exit_quota = True
+                    break
+                elif key.isdigit():
+                    for idx, (num, _, action) in enumerate(items):
+                        if num == key:
+                            selected_idx = idx
+                            triggered_action = action
+                            break
+                elif key in ('ENTER', 'SPACE'):
+                    triggered_action = items[selected_idx][2]
+
+                if triggered_action:
+                    if triggered_action == "toggle":
+                        new_state = 0 if enabled else 1
+                        c.execute("UPDATE quota_config SET enabled = ? WHERE id = 1", (new_state,))
+                        conn.commit()
+                        sync_db_to_settings(conn)
+                        break
+                    elif triggered_action == "set_limit":
+                        new_gb_str = prompt_text_input(conn, t(conn, "quota_prompt_limit"), f"{limit_gb:.0f}")
+                        try:
+                            new_gb = float(new_gb_str)
+                            if new_gb > 0:
+                                new_bytes = int(new_gb * 1024 * 1024 * 1024)
+                                c.execute("UPDATE quota_config SET total_limit_bytes = ? WHERE id = 1", (new_bytes,))
+                                conn.commit()
+                                sync_db_to_settings(conn)
+                        except ValueError:
+                            pass
+                        break
+                    elif triggered_action == "set_day":
+                        new_day_str = prompt_text_input(conn, t(conn, "quota_prompt_day"), str(start_day))
+                        try:
+                            new_day = int(new_day_str)
+                            if 1 <= new_day <= 31:
+                                c.execute("UPDATE quota_config SET cycle_start_day = ? WHERE id = 1", (new_day,))
+                                conn.commit()
+                                sync_db_to_settings(conn)
+                        except ValueError:
+                            pass
+                        break
+                    elif triggered_action == "set_daily_limit":
+                        def_val = "0" if is_auto_daily else f"{daily_limit_b / (1024*1024*1024):.2f}"
+                        new_dl_str = prompt_text_input(conn, t(conn, "quota_prompt_daily_limit"), def_val)
+                        try:
+                            val_f = float(new_dl_str)
+                            if val_f <= 0:
+                                c.execute("UPDATE quota_config SET daily_limit_bytes = 0 WHERE id = 1")
+                            else:
+                                new_b = int(val_f * 1024 * 1024 * 1024)
+                                c.execute("UPDATE quota_config SET daily_limit_bytes = ? WHERE id = 1", (new_b,))
+                            conn.commit()
+                            sync_db_to_settings(conn)
+                        except ValueError:
+                            pass
+                        break
+                    elif triggered_action == "set_daily_warn":
+                        new_dw_str = prompt_text_input(conn, t(conn, "quota_prompt_daily_warn"), str(daily_warn_pct))
+                        try:
+                            new_dw = int(new_dw_str)
+                            if 1 <= new_dw <= 100:
+                                c.execute("UPDATE quota_config SET daily_warn_percent = ? WHERE id = 1", (new_dw,))
+                                conn.commit()
+                                sync_db_to_settings(conn)
+                        except ValueError:
+                            pass
+                        break
+                    elif triggered_action == "set_warn":
+                        new_w_str = prompt_text_input(conn, t(conn, "quota_prompt_warn"), str(warn_pct))
+                        try:
+                            new_w = int(new_w_str)
+                            if 1 <= new_w <= 100:
+                                c.execute("UPDATE quota_config SET warn_threshold_percent = ? WHERE id = 1", (new_w,))
+                                conn.commit()
+                                sync_db_to_settings(conn)
+                        except ValueError:
+                            pass
+                        break
+                    elif triggered_action == "set_crit":
+                        new_c_str = prompt_text_input(conn, t(conn, "quota_prompt_crit"), str(crit_pct))
+                        try:
+                            new_c = int(new_c_str)
+                            if 1 <= new_c <= 100:
+                                c.execute("UPDATE quota_config SET crit_threshold_percent = ? WHERE id = 1", (new_c,))
+                                conn.commit()
+                                sync_db_to_settings(conn)
+                        except ValueError:
+                            pass
+                        break
+                    elif triggered_action == "test_notif":
+                        try:
+                            subprocess.run([
+                                "notify-send", "-u", "normal", "-a", "HorusNet",
+                                t(conn, "quota_test_notif_title"),
+                                t(conn, "quota_test_notif_msg")
+                            ], check=False)
+                            msg_banner = f"● {t(conn, 'notif_sent')}"
+                        except Exception as e:
+                            msg_banner = f"Notification error: {e}"
+                    elif triggered_action == "back":
+                        exit_quota = True
+                        break
+
+            if exit_quota:
+                break
+        finally:
+            sys.stdout.write(CURSOR_SHOW)
+            sys.stdout.flush()
+
+def select_theme_dialog(conn):
+    themes = load_themes()
+    settings = load_settings()
+    current_theme = settings.get("theme", get_config_val(conn, "theme", "cyan"))
+    lang = get_lang(conn)
+    theme_keys = list(themes.keys())
+    selected_idx = theme_keys.index(current_theme) if current_theme in theme_keys else 0
+
+    sys.stdout.write(CURSOR_HIDE)
+    sys.stdout.write(CLR_CLEAR_SCREEN)
+    sys.stdout.flush()
+
+    try:
+        while True:
+            active_preview_th = themes[theme_keys[selected_idx]]
+            buf = [CLR_HOME]
+            buf.append(f"{CLR_BOLD}{active_preview_th['border']}╔═══════════════════════════════════════════════════════════╗{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{CLR_BOLD}{active_preview_th['primary']}║                   [ {t(conn, 'setting_theme')} ]                 ║{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{CLR_BOLD}{active_preview_th['border']}╚═══════════════════════════════════════════════════════════╝{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{active_preview_th['dim']}  {t(conn, 'theme_nav_hint')}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+
+            for idx, key in enumerate(theme_keys):
+                th_obj = themes[key]
+                mark = "[*]" if key == current_theme else "[ ]"
+                label = th_obj.get(f"name_{lang}", th_obj["name_en"])
+                num_label = f"[{idx+1}] {mark} {label}"
+                if idx == selected_idx:
+                    buf.append(f"  {CLR_BOLD}{th_obj['primary']}❯ {CLR_REVERSE} {num_label} {CLR_RESET}{CLR_CLEAR_LINE}\n")
+                else:
+                    buf.append(f"    {th_obj['primary']}{num_label}{CLR_RESET}{CLR_CLEAR_LINE}\n")
+
+            buf.append(f"\n{active_preview_th['dim']}─────────────────────────────────────────────────────────────{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{active_preview_th['dim']}  {t(conn, 'theme_preview_label')}{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            sys.stdout.write("".join(buf))
+            sys.stdout.flush()
+
+            key = get_key()
+            if key == 'UP':
+                selected_idx = (selected_idx - 1) % len(theme_keys)
+            elif key == 'DOWN':
+                selected_idx = (selected_idx + 1) % len(theme_keys)
+            elif key.isdigit():
+                digit_idx = int(key) - 1
+                if 0 <= digit_idx < len(theme_keys):
+                    set_config_val(conn, "theme", theme_keys[digit_idx])
+                    break
+            elif key in ('ENTER', 'SPACE'):
+                set_config_val(conn, "theme", theme_keys[selected_idx])
+                break
+            elif key in ('ESC', 'QUIT', 'CTRL_C'):
+                break
+    finally:
+        sys.stdout.write(CURSOR_SHOW)
+        sys.stdout.flush()
+
+def select_language_dialog(conn, is_initial=False):
+    th = get_theme(conn)
+    options = [
+        ("1", "العربية (Arabic)", "ar"),
+        ("2", "English", "en")
+    ]
+    current_lang = get_lang(conn)
+    selected_idx = 0 if current_lang == "ar" else 1
+
+    sys.stdout.write(CURSOR_HIDE)
+    sys.stdout.write(CLR_CLEAR_SCREEN)
+    sys.stdout.flush()
+
+    try:
+        while True:
+            title = t(conn, "first_run_title") if is_initial else t(conn, "setting_language")
+            prompt = t(conn, "first_run_prompt") if is_initial else t(conn, "setting_language")
+
+            buf = [CLR_HOME]
+            buf.append(f"{CLR_BOLD}{th['border']}╔═══════════════════════════════════════════════════════════╗{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{CLR_BOLD}{th['primary']}║                     [ {title} ]                   ║{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{CLR_BOLD}{th['border']}╚═══════════════════════════════════════════════════════════╝{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{th['dim']}  {prompt}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+
+            for idx, (num, label, code) in enumerate(options):
+                mark = "[*]" if code == current_lang else "[ ]"
+                item_display = f"[{num}] {mark} {label}"
+                if idx == selected_idx:
+                    buf.append(f"  {CLR_BOLD}{th['accent']}❯ {CLR_REVERSE} {item_display} {CLR_RESET}{CLR_CLEAR_LINE}\n")
+                else:
+                    buf.append(f"    {item_display}{CLR_CLEAR_LINE}\n")
+
+            buf.append(f"\n{th['dim']}─────────────────────────────────────────────────────────────{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{th['dim']}  ↑ / ↓ للتنقل | Enter للاختيار | أو اضغط 1 أو 2 مباشرة{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            sys.stdout.write("".join(buf))
+            sys.stdout.flush()
+
+            key = get_key()
+            if key == 'UP':
+                selected_idx = (selected_idx - 1) % len(options)
+            elif key == 'DOWN':
+                selected_idx = (selected_idx + 1) % len(options)
+            elif key in ('1', '2'):
+                opt_idx = 0 if key == '1' else 1
+                chosen_lang = options[opt_idx][2]
+                set_config_val(conn, "language", chosen_lang)
+                break
+            elif key in ('ENTER', 'SPACE'):
+                chosen_lang = options[selected_idx][2]
+                set_config_val(conn, "language", chosen_lang)
+                break
+            elif key in ('ESC', 'QUIT', 'CTRL_C') and not is_initial:
+                break
+    finally:
+        sys.stdout.write(CURSOR_SHOW)
+        sys.stdout.flush()
+
+def settings_menu(conn):
+    while True:
+        branding = load_branding()
+        th = get_theme(conn)
+        lang = get_lang(conn)
+        curr_theme_name = th.get(f"name_{lang}", th["name_en"])
+        
+        q_stat = get_quota_status(conn)
+        if q_stat.get("enabled"):
+            q_info = f"{t(conn, 'enabled')} ({format_bytes(q_stat['limit'])})"
+        else:
+            q_info = t(conn, "disabled")
+
+        logo_status = t(conn, "enabled") if branding.get("show_logo", True) else t(conn, "disabled")
+
+        settings_items = [
+            ("1", f"[1] {t(conn, 'setting_theme')}: [ {curr_theme_name} ]", "theme"),
+            ("2", f"[2] {t(conn, 'setting_quota')}: [ {q_info} ]", "quota"),
+            ("3", f"[3] {t(conn, 'setting_logo')}: [ {logo_status} ]", "logo_toggle"),
+            ("0", f"[0] {t(conn, 'setting_back')}", "back")
+        ]
+        selected_idx = 0
+
+        sys.stdout.write(CURSOR_HIDE)
+        sys.stdout.write(CLR_CLEAR_SCREEN)
+        sys.stdout.flush()
+
+        try:
+            exit_settings = False
+            while True:
+                buf = [CLR_HOME]
+                buf.append(f"{CLR_BOLD}{th['border']}╔═══════════════════════════════════════════════════════════╗{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                buf.append(f"{CLR_BOLD}{th['primary']}║                   [ {t(conn, 'settings_title')} ]                 ║{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                buf.append(f"{CLR_BOLD}{th['border']}╚═══════════════════════════════════════════════════════════╝{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                buf.append(f"{th['dim']}  {t(conn, 'nav_hint')}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+
+                for idx, (_, label, _) in enumerate(settings_items):
+                    if idx == selected_idx:
+                        buf.append(f"  {CLR_BOLD}{th['accent']}❯ {CLR_REVERSE} {label} {CLR_RESET}{CLR_CLEAR_LINE}\n")
+                    else:
+                        buf.append(f"    {label}{CLR_CLEAR_LINE}\n")
+
+                buf.append(f"\n{th['dim']}─────────────────────────────────────────────────────────────{CLR_RESET}{CLR_CLEAR_LINE}\n")
+                sys.stdout.write("".join(buf))
+                sys.stdout.flush()
+
+                key = get_key()
+                triggered_action = None
+
+                if key == 'UP':
+                    selected_idx = (selected_idx - 1) % len(settings_items)
+                elif key == 'DOWN':
+                    selected_idx = (selected_idx + 1) % len(settings_items)
+                elif key in ('ESC', 'QUIT', 'CTRL_C'):
+                    exit_settings = True
+                    break
+                elif key.isdigit():
+                    for idx, (num, _, action) in enumerate(settings_items):
+                        if num == key:
+                            selected_idx = idx
+                            triggered_action = action
+                            break
+                elif key in ('ENTER', 'SPACE'):
+                    triggered_action = settings_items[selected_idx][2]
+
+                if triggered_action:
+                    if triggered_action == "theme":
+                        select_theme_dialog(conn)
+                        break
+                    elif triggered_action == "quota":
+                        quota_settings_menu(conn)
+                        break
+                    elif triggered_action == "logo_toggle":
+                        branding["show_logo"] = not branding.get("show_logo", True)
+                        save_branding(branding)
+                        break
+                    elif triggered_action == "back":
+                        exit_settings = True
+                        break
+
+            if exit_settings:
+                break
+        finally:
+            sys.stdout.write(CURSOR_SHOW)
+            sys.stdout.flush()
+
+# ----------------------------------------------------
+# Report Export Engine (CSV / JSON / HTML)
+# ----------------------------------------------------
+
+def export_csv(conn, filepath=None):
+    if not filepath:
+        filepath = os.path.expanduser("~/horusnet_daily_report.csv")
+    filepath = os.path.abspath(os.path.expanduser(filepath))
+    c = conn.cursor()
+    c.execute("""
+        SELECT date, interface, rx, tx, (rx + tx) as total
+        FROM daily_stats
+        ORDER BY date DESC, interface ASC
+    """)
+    rows = c.fetchall()
+
+    with open(filepath, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Date", "Interface", "Download_Bytes", "Upload_Bytes", "Total_Bytes", "Download_Formatted", "Upload_Formatted", "Total_Formatted"])
+        for d, iface, rx, tx, tot in rows:
+            writer.writerow([d, iface, rx, tx, tot, format_bytes(rx), format_bytes(tx), format_bytes(tot)])
+    return filepath
+
+def export_json(conn, filepath=None):
+    if not filepath:
+        filepath = os.path.expanduser("~/horusnet_report.json")
+    filepath = os.path.abspath(os.path.expanduser(filepath))
+    c = conn.cursor()
+
+    branding = load_branding()
+    quota = get_quota_status(conn)
+
+    c.execute("SELECT date, interface, rx, tx FROM daily_stats ORDER BY date DESC")
+    daily = [{"date": r[0], "interface": r[1], "rx": r[2], "tx": r[3], "total": r[2] + r[3]} for r in c.fetchall()]
+
+    c.execute("SELECT date, hour, interface, rx, tx FROM hourly_stats ORDER BY date DESC, hour ASC")
+    hourly = [{"date": r[0], "hour": r[1], "interface": r[2], "rx": r[3], "tx": r[4], "total": r[3] + r[4]} for r in c.fetchall()]
+
+    data = {
+        "generator": branding.get("name", "HorusNet"),
+        "version": VERSION,
+        "exported_at": datetime.now().isoformat(),
+        "quota": quota,
+        "daily_stats": daily,
+        "hourly_stats": hourly
+    }
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    return filepath
+
+def export_html(conn, filepath=None):
+    if not filepath:
+        filepath = os.path.expanduser("~/horusnet_report.html")
+    filepath = os.path.abspath(os.path.expanduser(filepath))
+
+    branding = load_branding()
+    quota = get_quota_status(conn)
+    c = conn.cursor()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    this_month = datetime.now().strftime("%Y-%m")
+
+    # Metrics
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date = ?", (today,))
+    row = c.fetchone()
+    today_rx, today_tx = (row[0] or 0), (row[1] or 0)
+
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date = ?", (yesterday,))
+    row = c.fetchone()
+    yest_rx, yest_tx = (row[0] or 0), (row[1] or 0)
+
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats WHERE date LIKE ?", (f"{this_month}%",))
+    row = c.fetchone()
+    month_rx, month_tx = (row[0] or 0), (row[1] or 0)
+
+    c.execute("SELECT SUM(rx), SUM(tx) FROM daily_stats")
+    row = c.fetchone()
+    life_rx, life_tx = (row[0] or 0), (row[1] or 0)
+
+    # Hourly for today
+    c.execute("SELECT hour, SUM(rx + tx) FROM hourly_stats WHERE date = ? GROUP BY hour ORDER BY hour ASC", (today,))
+    h_data = {r[0]: r[1] for r in c.fetchall()}
+    max_h = max(h_data.values()) if h_data and max(h_data.values()) > 0 else 1
+
+    chart_bars_html = ""
+    for h in range(24):
+        val = h_data.get(h, 0)
+        pct = (val / max_h * 100) if max_h > 0 else 0
+        is_peak = (val == max_h and val > 0)
+        cls = "bar-fill peak" if is_peak else "bar-fill"
+        chart_bars_html += f'''
+        <div class="bar-col" title="{h:02d}:00 - {format_bytes(val)}">
+          <div class="{cls}" style="height: {max(pct, 3):.1f}%;"></div>
+          <div class="bar-label">{h:02d}</div>
+        </div>
+        '''
+
+    # Daily table
+    c.execute("""
+        SELECT date, SUM(rx), SUM(tx), SUM(rx + tx)
+        FROM daily_stats
+        GROUP BY date
+        ORDER BY date DESC
+        LIMIT 30
+    """)
+    daily_rows = c.fetchall()
+    daily_tr_html = ""
+    for d, rx, tx, tot in daily_rows:
+        daily_tr_html += f'''
+        <tr>
+          <td><strong>{d}</strong></td>
+          <td class="down">▼ {format_bytes(rx)}</td>
+          <td class="up">▲ {format_bytes(tx)}</td>
+          <td class="tot">● {format_bytes(tot)}</td>
+        </tr>
+        '''
+
+    quota_card_html = ""
+    if quota.get("enabled"):
+        pct = quota["percentage"]
+        quota_card_html = f'''
+        <div class="card quota-card">
+          <div class="card-label">Monthly Data Quota</div>
+          <div class="card-val">{pct:.1f}%</div>
+          <div class="quota-bar-bg"><div class="quota-bar-fill" style="width: {min(pct, 100):.1f}%;"></div></div>
+          <div class="card-sub">Remaining: {format_bytes(quota["remaining"])} of {format_bytes(quota["limit"])} ({quota["days_left"]} days until renewal)</div>
+        </div>
+        '''
+
+    html_content = f'''<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{branding.get("name", "HorusNet")} - Network Usage Report</title>
+<style>
+  :root {{
+    --bg-primary: #0d1117;
+    --bg-card: #161b22;
+    --bg-hover: #21262d;
+    --text-primary: #c9d1d9;
+    --text-muted: #8b949e;
+    --accent-gold: #e5c07b;
+    --accent-blue: #61afef;
+    --accent-cyan: #56b6c2;
+    --accent-green: #98c379;
+    --accent-red: #e06c75;
+    --border: #30363d;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, Tahoma, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    padding: 24px;
+  }}
+  .container {{ max-width: 1050px; margin: 0 auto; }}
+  header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }}
+  .logo-title h1 {{ color: var(--accent-gold); font-size: 1.8rem; letter-spacing: 0.5px; }}
+  .logo-title p {{ color: var(--text-muted); font-size: 0.9rem; }}
+  .meta-badge {{ background: #21262d; border: 1px solid var(--border); padding: 6px 14px; border-radius: 8px; font-size: 0.85rem; color: var(--text-muted); }}
+  .cards-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }}
+  .card {{
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+  }}
+  .card-label {{ color: var(--text-muted); font-size: 0.85rem; margin-bottom: 4px; }}
+  .card-val {{ font-size: 1.6rem; font-weight: bold; color: var(--text-primary); }}
+  .card-sub {{ font-size: 0.8rem; color: var(--text-muted); margin-top: 6px; }}
+  .quota-bar-bg {{ background: #21262d; height: 8px; border-radius: 4px; overflow: hidden; margin: 8px 0; }}
+  .quota-bar-fill {{ background: var(--accent-gold); height: 100%; border-radius: 4px; }}
+  .section-title {{
+    font-size: 1.25rem;
+    color: var(--accent-gold);
+    margin: 32px 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }}
+  .chart-container {{
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 28px;
+  }}
+  .chart-bars {{
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    height: 160px;
+    padding-top: 10px;
+    border-bottom: 1px solid var(--border);
+  }}
+  .bar-col {{
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: flex-end;
+  }}
+  .bar-fill {{
+    width: 100%;
+    background: linear-gradient(180deg, var(--accent-gold) 0%, rgba(229,192,123,0.2) 100%);
+    border-radius: 3px 3px 0 0;
+    min-height: 2px;
+  }}
+  .bar-fill.peak {{
+    background: linear-gradient(180deg, var(--accent-cyan) 0%, rgba(86,182,194,0.3) 100%);
+  }}
+  .bar-label {{ font-size: 0.65rem; color: var(--text-muted); margin-top: 6px; }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-card);
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }}
+  th, td {{
+    padding: 12px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }}
+  th {{ background: #161b22; color: var(--text-muted); font-size: 0.85rem; font-weight: 600; }}
+  tr:hover td {{ background: var(--bg-hover); }}
+  .down {{ color: var(--accent-cyan); font-weight: 500; }}
+  .up {{ color: var(--accent-green); font-weight: 500; }}
+  .tot {{ color: var(--accent-gold); font-weight: bold; }}
+  footer {{
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo-title">
+      <h1>{branding.get("name", "HorusNet")}</h1>
+      <p>{branding.get("tagline_en", "Network Traffic Monitor & Analyzer")}</p>
+    </div>
+    <div class="meta-badge">
+      Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
+    </div>
+  </header>
+
+  <div class="cards-grid">
+    <div class="card">
+      <div class="card-label">Daily Usage ({today})</div>
+      <div class="card-val">{format_bytes(today_rx + today_tx)}</div>
+      <div class="card-sub">▼ {format_bytes(today_rx)}  |  ▲ {format_bytes(today_tx)}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Yesterday ({yesterday})</div>
+      <div class="card-val">{format_bytes(yest_rx + yest_tx)}</div>
+      <div class="card-sub">▼ {format_bytes(yest_rx)}  |  ▲ {format_bytes(yest_tx)}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">This Month ({this_month})</div>
+      <div class="card-val">{format_bytes(month_rx + month_tx)}</div>
+      <div class="card-sub">▼ {format_bytes(month_rx)}  |  ▲ {format_bytes(month_tx)}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Lifetime Total Usage</div>
+      <div class="card-val">{format_bytes(life_rx + life_tx)}</div>
+      <div class="card-sub">▼ {format_bytes(life_rx)}  |  ▲ {format_bytes(life_tx)}</div>
+    </div>
+  </div>
+
+  {quota_card_html}
+
+  <div class="section-title">
+    <span>●</span> Hourly Traffic Breakdown (24h)
+  </div>
+  <div class="chart-container">
+    <div class="chart-bars">
+      {chart_bars_html}
+    </div>
+  </div>
+
+  <div class="section-title">
+    <span>●</span> Daily Usage History (Last 30 Days)
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>▼ Download</th>
+        <th>▲ Upload</th>
+        <th>● Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {daily_tr_html}
+    </tbody>
+  </table>
+
+  <footer>
+    Automatically generated by <strong>{branding.get("name", "HorusNet")}</strong> | Offline & Privacy First
+  </footer>
+</div>
+</body>
+</html>
+'''
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    return filepath
+
+def export_reports_menu(conn):
+    th = get_theme(conn)
+    items = [
+        ("1", f"[1] {t(conn, 'export_html_btn')}", "html"),
+        ("2", f"[2] {t(conn, 'export_csv_btn')}", "csv"),
+        ("3", f"[3] {t(conn, 'export_json_btn')}", "json"),
+        ("0", f"[0] {t(conn, 'setting_back')}", "back")
+    ]
+    selected_idx = 0
+    msg_banner = ""
+
+    sys.stdout.write(CURSOR_HIDE)
+    sys.stdout.write(CLR_CLEAR_SCREEN)
+    sys.stdout.flush()
+
+    while True:
+        buf = [CLR_HOME]
+        buf.append(f"{CLR_BOLD}{th['border']}╔═══════════════════════════════════════════════════════════╗{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        buf.append(f"{CLR_BOLD}{th['primary']}║               [ {t(conn, 'export_title')} ]             ║{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        buf.append(f"{CLR_BOLD}{th['border']}╚═══════════════════════════════════════════════════════════╝{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        buf.append(f"{th['dim']}  {t(conn, 'nav_hint')}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+
+        if msg_banner:
+            buf.append(f"  {CLR_BOLD}{th['accent']}{msg_banner}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+            msg_banner = ""
+
+        for idx, (_, label, _) in enumerate(items):
+            if idx == selected_idx:
+                buf.append(f"  {CLR_BOLD}{th['accent']}❯ {CLR_REVERSE} {label} {CLR_RESET}{CLR_CLEAR_LINE}\n")
+            else:
+                buf.append(f"    {label}{CLR_CLEAR_LINE}\n")
+
+        buf.append(f"\n{th['dim']}─────────────────────────────────────────────────────────────{CLR_RESET}{CLR_CLEAR_LINE}\n")
+        sys.stdout.write("".join(buf))
+        sys.stdout.flush()
+
+        key = get_key()
+        triggered = None
+
+        if key == 'UP':
+            selected_idx = (selected_idx - 1) % len(items)
+        elif key == 'DOWN':
+            selected_idx = (selected_idx + 1) % len(items)
+        elif key in ('ESC', 'QUIT', 'CTRL_C'):
+            break
+        elif key.isdigit():
+            for idx, (num, _, action) in enumerate(items):
+                if num == key:
+                    selected_idx = idx
+                    triggered = action
+                    break
+        elif key in ('ENTER', 'SPACE'):
+            triggered = items[selected_idx][2]
+
+        if triggered:
+            if triggered == "back":
+                break
+            elif triggered == "html":
+                path = export_html(conn)
+                msg_banner = f"{t(conn, 'export_success')} {path}"
+            elif triggered == "csv":
+                path = export_csv(conn)
+                msg_banner = f"{t(conn, 'export_success')} {path}"
+            elif triggered == "json":
+                path = export_json(conn)
+                msg_banner = f"{t(conn, 'export_success')} {path}"
+
+# ----------------------------------------------------
+# Main Interactive Loop
+# ----------------------------------------------------
+
+def interactive_menu(conn):
+    if get_config_val(conn, "language") is None:
+        set_config_val(conn, "language", "en")
+
+    selected_idx = 0
+    sys.stdout.write(CURSOR_HIDE)
+    sys.stdout.write(CLR_CLEAR_SCREEN)
+    sys.stdout.flush()
+    need_full_clear = False
+
+    try:
+        while True:
+            branding = load_branding()
+            th = get_theme(conn)
+            tagline = branding.get(f"tagline_{get_lang(conn)}", branding["name"])
+
+            menu_items = [
+                ("1", f"[1] {t(conn, 'menu_summary')}", "summary"),
+                ("2", f"[2] {t(conn, 'menu_daily')}", "daily"),
+                ("3", f"[3] {t(conn, 'menu_monthly')}", "monthly"),
+                ("4", f"[4] {t(conn, 'menu_hourly')}", "hourly"),
+                ("5", f"[5] {t(conn, 'menu_apps')}", "apps"),
+                ("6", f"[6] {t(conn, 'menu_interfaces')}", "interfaces"),
+                ("7", f"[7] {t(conn, 'menu_live')}", "live"),
+                ("8", f"[8] {t(conn, 'menu_export')}", "export"),
+                ("9", f"[9] {t(conn, 'menu_settings')}", "settings"),
+                ("0", f"[0] {t(conn, 'menu_exit')}", "exit")
+            ]
+
+            if need_full_clear:
+                sys.stdout.write(CLR_CLEAR_SCREEN)
+                need_full_clear = False
+
+            buf = [CLR_HOME]
+
+            # Draw ASCII Logo if enabled
+            if branding.get("show_logo", True) and "ascii_logo" in branding:
+                buf.append(f"{CLR_BOLD}{th['primary']}\n")
+                for line in branding["ascii_logo"]:
+                    buf.append(f"  {line}{CLR_CLEAR_LINE}\n")
+                buf.append(f"{CLR_RESET}{CLR_CLEAR_LINE}\n")
+
+            # App Title & Subtitle
+            buf.append(f"{CLR_BOLD}{th['border']}╔═══════════════════════════════════════════════════════════╗{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            title_line = f"║             [ {branding['name']} - {tagline} ]"
+            title_line = title_line[:59].ljust(59) + "║"
+            buf.append(f"{CLR_BOLD}{th['primary']}{title_line}{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{CLR_BOLD}{th['border']}╚═══════════════════════════════════════════════════════════╝{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            buf.append(f"{th['dim']}  {t(conn, 'nav_hint')}{CLR_RESET}{CLR_CLEAR_LINE}\n\n")
+
+            for idx, (_, label, _) in enumerate(menu_items):
+                if idx == selected_idx:
+                    buf.append(f"  {CLR_BOLD}{th['accent']}❯ {CLR_REVERSE} {label} {CLR_RESET}{CLR_CLEAR_LINE}\n")
+                else:
+                    buf.append(f"    {label}{CLR_CLEAR_LINE}\n")
+
+            buf.append(f"\n{th['dim']}─────────────────────────────────────────────────────────────{CLR_RESET}{CLR_CLEAR_LINE}\n")
+            sys.stdout.write("".join(buf))
+            sys.stdout.flush()
+
+            key = get_key()
+            triggered_action = None
+
+            if key == 'UP':
+                selected_idx = (selected_idx - 1) % len(menu_items)
+            elif key == 'DOWN':
+                selected_idx = (selected_idx + 1) % len(menu_items)
+            elif key in ('ESC', 'QUIT', 'CTRL_C'):
+                break
+            elif key.isdigit():
+                for idx, (num, _, action) in enumerate(menu_items):
+                    if num == key:
+                        selected_idx = idx
+                        triggered_action = action
+                        break
+            elif key in ('ENTER', 'SPACE'):
+                triggered_action = menu_items[selected_idx][2]
+
+            if triggered_action:
+                action = triggered_action
+                need_full_clear = True
+                
+                if action == "exit":
+                    break
+
+                if action == "settings":
+                    settings_menu(conn)
+                    continue
+
+                if action == "export":
+                    export_reports_menu(conn)
+                    continue
+
+                sys.stdout.write(CURSOR_SHOW)
+                sys.stdout.write(CLR_CLEAR_SCREEN)
+                sys.stdout.flush()
+
+                if action == "summary":
+                    show_summary(conn)
+                    sys.stdout.write(CURSOR_HIDE)
+                    should_continue = wait_for_enter_or_q(conn)
+                    if not should_continue:
+                        break
+                elif action == "daily":
+                    show_daily(conn, limit=14)
+                    sys.stdout.write(CURSOR_HIDE)
+                    should_continue = wait_for_enter_or_q(conn)
+                    if not should_continue:
+                        break
+                elif action == "monthly":
+                    show_monthly(conn)
+                    sys.stdout.write(CURSOR_HIDE)
+                    should_continue = wait_for_enter_or_q(conn)
+                    if not should_continue:
+                        break
+                elif action == "hourly":
+                    show_hourly(conn)
+                elif action == "apps":
+                    show_applications(conn)
+                elif action == "interfaces":
+                    show_interfaces(conn)
+                    sys.stdout.write(CURSOR_HIDE)
+                    should_continue = wait_for_enter_or_q(conn)
+                    if not should_continue:
+                        break
+                elif action == "live":
+                    live_monitor(conn)
+                    sys.stdout.write(CURSOR_HIDE)
+                    should_continue = wait_for_enter_or_q(conn)
+                    if not should_continue:
+                        break
+
+    finally:
+        sys.stdout.write(CURSOR_SHOW)
+        sys.stdout.flush()
+        th = get_theme(conn)
+        print(f"\n{th['dim']}{t(conn, 'goodbye')}{CLR_RESET}\n")
+
+# ----------------------------------------------------
+# Main Entry Point
+# ----------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="netusage",
+        description="HorusNet / NetUsage - Network Traffic Monitor & Logger",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("-d", "--days", nargs="?", const=14, type=int, help="Show daily traffic history")
+    parser.add_argument("-m", "--months", action="store_true", help="Show monthly traffic history")
+    parser.add_argument("-H", "--hourly", nargs="?", const="TODAY", type=str, help="Show hourly breakdown and chart")
+    parser.add_argument("-a", "--apps", nargs="?", const="ALL", type=str, help="Show active applications network inspection")
+    parser.add_argument("-i", "--interfaces", action="store_true", help="Show per-interface details")
+    parser.add_argument("-l", "--live", nargs="?", const="ALL", type=str, help="Live bandwidth monitor")
+    parser.add_argument("-e", "--export", nargs="+", help="Export network traffic reports: --export {csv,json,html} [file_path]")
+    parser.add_argument("-o", "--output", type=str, help="Output file path for exported report")
+    parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
+    parser.add_argument("--update", action="store_true", help=argparse.SUPPRESS)
+
+    args = parser.parse_args()
+    conn = get_db()
+
+    if args.update:
+        update_traffic(conn)
+        conn.close()
+        return
+
+    if args.export:
+        fmt = args.export[0].lower()
+        target_path = args.export[1] if len(args.export) > 1 else (args.output or None)
+        if fmt not in ("csv", "json", "html"):
+            print(t(conn, "export_unsupported").format(fmt=fmt))
+            conn.close()
+            return
+
+        if fmt == "csv":
+            path = export_csv(conn, target_path)
+        elif fmt == "json":
+            path = export_json(conn, target_path)
+        elif fmt == "html":
+            path = export_html(conn, target_path)
+
+        print(t(conn, "export_success_cli").format(fmt=fmt.upper(), path=path))
+        conn.close()
+        return
+
+    if args.days is not None:
+        show_daily(conn, limit=args.days)
+    elif args.months:
+        show_monthly(conn)
+    elif args.hourly is not None:
+        target_d = None if args.hourly == "TODAY" else args.hourly
+        show_hourly(conn, target_date=target_d)
+    elif args.apps is not None:
+        if args.apps == "ALL":
+            show_applications(conn)
+        else:
+            apps_dict = get_process_network_info()
+            target_app = None
+            for name, data in apps_dict.items():
+                if name.lower() == args.apps.lower():
+                    target_app = data
+                    break
+            if not target_app:
+                c = conn.cursor()
+                c.execute("SELECT app_name FROM app_daily_stats WHERE LOWER(app_name) = ? LIMIT 1", (args.apps.lower(),))
+                db_match = c.fetchone()
+                if db_match:
+                    target_app = {"name": db_match[0], "pids": set(), "exe_path": "Inactive"}
+            if target_app:
+                inspect_app_details(conn, target_app)
+            else:
+                print(t(conn, "app_not_found_cli").format(app=args.apps))
+    elif args.interfaces:
+        show_interfaces(conn)
+    elif args.live is not None:
+        iface = None if args.live == "ALL" else args.live
+        live_monitor(conn, iface)
+    else:
+        if sys.stdin.isatty():
+            interactive_menu(conn)
+        else:
+            show_summary(conn)
+
+    conn.close()
+
+if __name__ == "__main__":
+    main()

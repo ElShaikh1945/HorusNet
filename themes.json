@@ -1,0 +1,79 @@
+{
+  "gold": {
+    "id": "gold",
+    "name_ar": "عين حورس الذهبية (Horus Gold)",
+    "name_en": "Horus Gold",
+    "primary": "\u001b[33m",
+    "secondary": "\u001b[93m",
+    "accent": "\u001b[32m",
+    "highlight": "\u001b[97m",
+    "dim": "\u001b[2m",
+    "border": "\u001b[33m"
+  },
+  "cyan": {
+    "id": "cyan",
+    "name_ar": "النيون السماوي (Cyan Neon - الافتراضي)",
+    "name_en": "Cyan Neon (Default)",
+    "primary": "\u001b[36m",
+    "secondary": "\u001b[34m",
+    "accent": "\u001b[32m",
+    "highlight": "\u001b[33m",
+    "dim": "\u001b[2m",
+    "border": "\u001b[36m"
+  },
+  "emerald": {
+    "id": "emerald",
+    "name_ar": "الزمردي (Emerald / Matrix)",
+    "name_en": "Emerald / Matrix",
+    "primary": "\u001b[32m",
+    "secondary": "\u001b[92m",
+    "accent": "\u001b[36m",
+    "highlight": "\u001b[97m",
+    "dim": "\u001b[2m",
+    "border": "\u001b[32m"
+  },
+  "synthwave": {
+    "id": "synthwave",
+    "name_ar": "السايبربانك (Synthwave / Magenta)",
+    "name_en": "Synthwave / Magenta",
+    "primary": "\u001b[35m",
+    "secondary": "\u001b[36m",
+    "accent": "\u001b[95m",
+    "highlight": "\u001b[33m",
+    "dim": "\u001b[2m",
+    "border": "\u001b[35m"
+  },
+  "monochrome": {
+    "id": "monochrome",
+    "name_ar": "أحادي اللون الكلاسيكي (Monochrome)",
+    "name_en": "Classic Monochrome",
+    "primary": "\u001b[97m",
+    "secondary": "\u001b[37m",
+    "accent": "\u001b[1m",
+    "highlight": "\u001b[7m",
+    "dim": "\u001b[2m",
+    "border": "\u001b[37m"
+  },
+  "dracula": {
+    "id": "dracula",
+    "name_ar": "دراكولا البنفسجي (Dracula)",
+    "name_en": "Dracula Violet",
+    "primary": "\u001b[95m",
+    "secondary": "\u001b[35m",
+    "accent": "\u001b[32m",
+    "highlight": "\u001b[93m",
+    "dim": "\u001b[2m",
+    "border": "\u001b[95m"
+  },
+  "nord": {
+    "id": "nord",
+    "name_ar": "الشمالي المتجمد (Nord Arctic)",
+    "name_en": "Nord Arctic",
+    "primary": "\u001b[94m",
+    "secondary": "\u001b[36m",
+    "accent": "\u001b[96m",
+    "highlight": "\u001b[97m",
+    "dim": "\u001b[2m",
+    "border": "\u001b[94m"
+  }
+}
