@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/horusnet_logo.svg" width="200" alt="HorusNet Logo" />
+</p>
+
 # 𓂀 HorusNet v2.1.0
 
 ```text

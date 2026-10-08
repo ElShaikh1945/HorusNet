@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background & Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#0e223d" stop-opacity="0.7" />
+      <stop offset="60%" stop-color="#070b14" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#04070d" stop-opacity="1" />
+    </radialGradient>
+
+    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" />
+      <stop offset="100%" stop-color="#0099ff" />
+    </linearGradient>
+
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffd700" />
+      <stop offset="100%" stop-color="#ffaa00" />
+    </linearGradient>
+
+    <linearGradient id="tealGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0072ff" />
+      <stop offset="100%" stop-color="#00f2fe" />
+    </linearGradient>
+
+    <!-- Neon Glow Filter -->
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Canvas Background -->
+  <rect width="512" height="512" rx="56" fill="url(#bgGlow)" />
+
+  <!-- Background Network Grid Elements -->
+  <g opacity="0.15" stroke="#00f2fe" stroke-width="1" fill="none">
+    <circle cx="256" cy="230" r="160" stroke-dasharray="4 8" />
+    <circle cx="256" cy="230" r="210" stroke-dasharray="2 12" />
+    <line x1="46" y1="230" x2="466" y2="230" stroke-dasharray="4 8" />
+    <line x1="256" y1="20" x2="256" y2="440" stroke-dasharray="4 8" />
+  </g>
+
+  <!-- Eye of Horus - Network Edition -->
+  <g filter="url(#neonGlow)">
+
+    <!-- 1. Eyebrow - Cyber Bandwidth Crest -->
+    <!-- Cyan Main Arch -->
+    <path d="M 130 180 Q 256 125 382 170 L 415 160 L 370 195 Q 256 145 155 195 Z" 
+          fill="url(#cyanGrad)" />
+
+    <!-- Gold Circuit Trace running parallel under eyebrow -->
+    <path d="M 165 205 Q 256 170 330 178 L 360 195 L 395 195" 
+          fill="none" stroke="url(#goldGrad)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="165" cy="205" r="4.5" fill="#ffd700" />
+    <circle cx="395" cy="195" r="4.5" fill="#ffd700" />
+
+    <!-- 2. Upper Eyelid - Telemetry Conduit -->
+    <path d="M 105 235 Q 256 135 407 235" 
+          fill="none" stroke="url(#cyanGrad)" stroke-width="14" stroke-linecap="round" />
+
+    <!-- 3. Lower Eyelid -->
+    <path d="M 105 235 Q 256 315 407 235" 
+          fill="none" stroke="url(#cyanGrad)" stroke-width="14" stroke-linecap="round" />
+
+    <!-- Inner Eyelid Accent Lines (Dual Data Stream) -->
+    <path d="M 130 235 Q 256 155 382 235" 
+          fill="none" stroke="#00f2fe" stroke-width="3" opacity="0.7" />
+    <path d="M 130 235 Q 256 295 382 235" 
+          fill="none" stroke="#00f2fe" stroke-width="3" opacity="0.7" />
+
+    <!-- 4. Central Hub & Radar Telemetry Rings (Pupil Core) -->
+    <!-- Outer Telemetry Ring with pulse breaks -->
+    <circle cx="256" cy="230" r="68" 
+            fill="none" stroke="url(#cyanGrad)" stroke-width="3.5" stroke-dasharray="24 8 8 8" />
+    <circle cx="256" cy="230" r="52" 
+            fill="none" stroke="#00d2ff" stroke-width="2" opacity="0.6" />
+
+    <!-- Gold Cross-hair Telemetry Pins -->
+    <g stroke="url(#goldGrad)" stroke-width="3" stroke-linecap="round">
+      <line x1="256" y1="170" x2="256" y2="195" />
+      <line x1="256" y1="265" x2="256" y2="290" />
+      <line x1="196" y1="230" x2="221" y2="230" />
+      <line x1="291" y1="230" x2="316" y2="230" />
+      <!-- Diagonal Nodes -->
+      <line x1="215" y1="190" x2="230" y2="205" />
+      <line x1="282" y1="255" x2="297" y2="270" />
+      <line x1="297" y1="190" x2="282" y2="205" />
+      <line x1="230" y1="255" x2="215" y2="270" />
+    </g>
+
+    <!-- Satellite Network Node Dots inside eye cavity -->
+    <circle cx="170" cy="230" r="5" fill="#00f2fe" />
+    <line x1="170" y1="230" x2="188" y2="230" stroke="#00f2fe" stroke-width="2.5" />
+    <circle cx="342" cy="230" r="5" fill="#00f2fe" />
+    <line x1="324" y1="230" x2="342" y2="230" stroke="#00f2fe" stroke-width="2.5" />
+
+    <circle cx="195" cy="205" r="4" fill="#ffd700" />
+    <circle cx="317" cy="255" r="4" fill="#ffd700" />
+
+    <!-- Central Router Core Glowing Pupil -->
+    <circle cx="256" cy="230" r="28" fill="#050d1a" stroke="url(#cyanGrad)" stroke-width="5" />
+    <circle cx="256" cy="230" r="16" fill="url(#cyanGrad)" />
+    <circle cx="256" cy="230" r="6" fill="#ffffff" />
+
+    <!-- 5. Falcon Teardrop (Download Stream / Digital Circuit Bus) -->
+    <!-- Main Downward Circuit Branch -->
+    <path d="M 185 285 L 185 365 L 170 385 L 170 410" 
+          fill="none" stroke="url(#cyanGrad)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="170" cy="410" r="6" fill="#00f2fe" />
+
+    <!-- Parallel Circuit Line 2 with Gold Node -->
+    <path d="M 205 295 L 205 350 L 195 365 L 195 385" 
+          fill="none" stroke="url(#goldGrad)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="195" cy="385" r="4.5" fill="#ffd700" />
+
+    <!-- Parallel Circuit Line 3 -->
+    <path d="M 220 292 L 220 340" 
+          fill="none" stroke="url(#cyanGrad)" stroke-width="4.5" stroke-linecap="round" />
+    <circle cx="220" cy="340" r="4" fill="#00f2fe" />
+
+    <!-- 6. Wedjat Spiral Curl (Upload Stream / Fiber Optical Loop) -->
+    <!-- Primary Flowing Spiral -->
+    <path d="M 235 295 Q 260 355 315 375 Q 365 390 395 360 Q 420 330 395 295 Q 365 265 340 295 Q 325 320 345 340 Q 365 350 375 330" 
+          fill="none" stroke="url(#cyanGrad)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" />
+
+    <!-- Inner Gold Signal Line tracing the spiral -->
+    <path d="M 255 315 Q 280 365 325 380 Q 360 390 380 370 Q 395 350 380 325" 
+          fill="none" stroke="url(#goldGrad)" stroke-width="3.5" stroke-linecap="round" />
+
+    <!-- Packet Nodes along the spiral vector -->
+    <circle cx="290" cy="350" r="5.5" fill="#ffd700" />
+    <circle cx="350" cy="375" r="5.5" fill="#00f2fe" />
+    <circle cx="395" cy="330" r="5" fill="#ffd700" />
+    <circle cx="355" cy="300" r="5" fill="#00f2fe" />
+
+  </g>
+
+  <!-- Futuristic Brand Wordmark at bottom -->
+  <text x="256" y="475" 
+        text-anchor="middle" 
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
+        font-size="24" 
+        font-weight="900" 
+        letter-spacing="8" 
+        fill="url(#cyanGrad)">HORUSNET</text>
+</svg>
