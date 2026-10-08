@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/horusnet_logo.svg" width="200" alt="HorusNet Logo" />
+  <img src="assets/horusnet_logo.svg" width="220" alt="HorusNet Logo" />
 </p>
 
 # 𓂀 HorusNet v2.1.0
@@ -42,14 +42,18 @@ HorusNet/
 ├── branding.json             # App identity, name, ASCII logo & taglines
 ├── settings.json             # User settings (quota, alerts, language, theme)
 ├── themes.json               # 7 Built-in palettes + custom theme support
+├── LICENSE                   # MIT License
+├── README.md                 # Project guide & quick start
+├── .gitignore                # Git exclusions
+├── assets/                   # Vector logo assets
+│   ├── horusnet_logo.svg     # Minimalist monoline vector logo
+│   └── horusnet_logo.png     # Rendered high-res PNG (512x512)
 ├── locales/                  # Localization dictionaries
 │   ├── en.json               # English dictionary (126 keys)
 │   └── ar.json               # Arabic dictionary (126 keys)
-├── systemd/                  # Automated 5-minute background collector
-│   ├── netusage-updater.service
-│   └── netusage-updater.timer
-├── README.md                 # Project guide & quick start
-└── PROJECT_MASTER_RECORD.md  # Comprehensive technical & architectural audit
+└── systemd/                  # Automated 5-minute background collector
+    ├── netusage-updater.service
+    └── netusage-updater.timer
 ```
 
 ---
@@ -92,11 +96,11 @@ HorusNet supports both an interactive terminal interface and script-friendly com
 | `horusnet` | Launches the interactive TUI menu |
 | `horusnet -d [N]` | Displays daily traffic history (default: last 14 days) |
 | `horusnet -m` | Displays monthly traffic history |
-| `horusnet --hourly [DATE]` | Displays hourly visual chart for today or specific date |
+| `horusnet -H [DATE]` | Displays hourly visual chart for today or specific date |
 | `horusnet -a ALL` | Lists all active applications sorted by traffic |
 | `horusnet -a <name>` | Deep inspection of specific application (e.g. `horusnet -a brave`) |
-| `horusnet -i` | Shows network interfaces, IP addresses, and lifetime totals |
-| `horusnet -l [IFACE]` | Launches live bandwidth speed meter (press `q` to exit) |
+| `horusnet -i` | Shows network interfaces, IP addresses, and status |
+| `horusnet -l [IFACE]` | Launches live bandwidth speed meter (press `q` or `Esc` to exit) |
 | `horusnet -e html [path]` | Exports a dark-mode interactive HTML report |
 | `horusnet -e csv [path]` | Exports traffic data to CSV spreadsheet |
 | `horusnet -e json [path]` | Exports traffic data to JSON |
@@ -153,5 +157,5 @@ All UI strings and labels are stored in `locales/en.json` and `locales/ar.json`.
 
 ## 📄 License & Privacy
 
-- **License:** Open Source / MIT
+- **License:** [MIT License](LICENSE) © 2026 Muhammad Al-Shaikh
 - **Privacy Guarantee:** 100% Offline. No external requests are made under any circumstances.

@@ -1,0 +1,24 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment
+.venv/
+venv/
+env/
+
+# Editor / OS files
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Exported user files
+export_*
